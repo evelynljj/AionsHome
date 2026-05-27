@@ -1,6 +1,7 @@
-﻿package com.aion.chat;
+package com.aion.chat;
 
 import android.app.AlarmManager;
+import android.app.KeyguardManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -19,6 +20,8 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.util.Base64;
+import android.util.DisplayMetrics;
 import android.util.Log;
 
 import androidx.annotation.Nullable;
@@ -57,6 +60,14 @@ import android.provider.Settings;
 
 import android.content.BroadcastReceiver;
 import android.content.IntentFilter;
+import android.graphics.Bitmap;
+import android.graphics.PixelFormat;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
 
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -67,6 +78,8 @@ import android.os.Handler;
 import android.os.Looper;
 
 import java.text.SimpleDateFormat;
+import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
 import java.util.Calendar;
 import java.util.Locale;
 
@@ -140,6 +153,19 @@ public class AionPushService extends Service {
     private volatile boolean screenOn = true;
     private BroadcastReceiver screenReceiver;
 
+    // ── 手机屏幕截图（MediaProjection，需要用户显式授权）──
+    public static final String ACTION_START_PHONE_SCREEN = "start_phone_screen_projection";
+    public static final String ACTION_STOP_PHONE_SCREEN = "stop_phone_screen_projection";
+    public static final String EXTRA_RESULT_CODE = "result_code";
+    public static final String EXTRA_RESULT_DATA = "result_data";
+    private final Object phoneScreenLock = new Object();
+    private MediaProjectionManager projectionManager;
+    private MediaProjection mediaProjection;
+    private VirtualDisplay phoneScreenDisplay;
+    private ImageReader phoneScreenReader;
+    private volatile boolean phoneScreenEnabled = false;
+    private volatile long lastPhoneCaptureAt = 0;
+
     // ── 步数计数 ──
     // 使用 TYPE_STEP_COUNTER（硬件累计步数，低功耗），搭载定位线程 10 分钟上报
     // 凌晨 5:00 重置（逻辑日期以 5:00 为分界，适应晚睡作息）
@@ -147,6 +173,8 @@ public class AionPushService extends Service {
     private SensorManager sensorManager;
     private Sensor stepSensor;
     private volatile float latestStepCounter = -1;  // 传感器最新值（开机累计）
+    private volatile int serverStepRestore = -1;    // 服务端恢复的步数（重装 APK 后使用）
+    private volatile boolean stepRestorePending = false; // 正在从服务端恢复步数
     private Handler mainHandler;  // 主线程 Handler，传感器回调需要 Looper
     private static final String PREF_STEP_DAY_START = "step_day_start_counter";
     private static final String PREF_STEP_REBOOT_OFFSET = "step_reboot_offset";
@@ -199,6 +227,16 @@ public class AionPushService extends Service {
                 Log.d(TAG, "foreground=" + isForegroundActive);
                 return START_STICKY;
             }
+            if (ACTION_START_PHONE_SCREEN.equals(action)) {
+                int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
+                Intent resultData = intent.getParcelableExtra(EXTRA_RESULT_DATA);
+                startPhoneScreenProjection(resultCode, resultData);
+                // 不提前返回：如果这是 Service 首次启动，还需要继续初始化 URL、前台服务和 WebSocket。
+            }
+            if (ACTION_STOP_PHONE_SCREEN.equals(action)) {
+                stopPhoneScreenProjection();
+                return START_STICKY;
+            }
 
             String url = intent.getStringExtra("url");
             if (url != null) {
@@ -217,7 +255,7 @@ public class AionPushService extends Service {
 
         if (serverUrl == null) {
             SharedPreferences prefs = getSharedPreferences("aion_prefs", MODE_PRIVATE);
-            String saved = prefs.getString("saved_url", "http://192.168.xx.xxx:8080/chat");
+            String saved = prefs.getString("saved_url", "http://192.168.1.92:8080/chat");
             serverUrl = saved.replace("http://", "ws://").replace("https://", "wss://")
                              .replace("/chat", "/ws");
         }
@@ -227,6 +265,9 @@ public class AionPushService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             // Android 14+: 需要声明所有用到的前台服务类型
             int serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+            if (phoneScreenEnabled || mediaProjection != null) {
+                serviceType |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+            }
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
                     == PackageManager.PERMISSION_GRANTED) {
                 serviceType |= ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
@@ -255,6 +296,7 @@ public class AionPushService extends Service {
         if (locationThread != null) locationThread.interrupt();
         if (activityThread != null) activityThread.interrupt();
         stopEsp32Bridge();
+        stopPhoneScreenProjection();
         unregisterScreenReceiver();
         if (sensorManager != null) sensorManager.unregisterListener(stepListener);
         if (webSocket != null) try { webSocket.cancel(); } catch (Exception ignored) {}
@@ -508,6 +550,7 @@ public class AionPushService extends Service {
             int steps = getTodaySteps();
             if (steps >= 0) {
                 body.put("steps", steps);
+                body.put("step_logical_date", getLogicalDate());
             }
             // 传感器诊断信息一并上报，方便服务端排查
             boolean hasPerm = ContextCompat.checkSelfPermission(this,
@@ -623,6 +666,11 @@ public class AionPushService extends Service {
                 case "monitor_alert": {
                     String c = data != null ? data.optString("content", "监控提醒") : "监控提醒";
                     showNotif(CH_ALARM, "👁 监控", c, true);
+                    schedulePhoneScreenCapture("monitor_alert");
+                    break;
+                }
+                case "cam_check": {
+                    schedulePhoneScreenCapture("cam_check");
                     break;
                 }
                 case "music": {
@@ -912,6 +960,258 @@ public class AionPushService extends Service {
     }
 
     // ══════════════════════════════════════════════════════════
+    //  手机屏幕截图 — MediaProjection 授权后按监控提示抓取一帧
+    // ══════════════════════════════════════════════════════════
+
+    private void startPhoneScreenProjection(int resultCode, Intent resultData) {
+        if (resultCode == 0 || resultData == null) {
+            Log.w(TAG, "📱 screen projection missing result");
+            return;
+        }
+        synchronized (phoneScreenLock) {
+            stopPhoneScreenProjectionLocked();
+            try {
+                if (projectionManager == null) {
+                    projectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+                }
+                if (projectionManager == null) {
+                    Log.w(TAG, "📱 MediaProjectionManager unavailable");
+                    postPhoneScreenSkip("projection_manager_unavailable", false);
+                    return;
+                }
+
+                // Android 14+ 要求 MediaProjection 会话运行在 mediaProjection 类型的前台服务中。
+                // 用户授权已在 ActivityResult 中完成，这里先把服务类型提升，再创建投影实例和虚拟显示。
+                updateForegroundForProjection();
+                mediaProjection = projectionManager.getMediaProjection(resultCode, resultData);
+                if (mediaProjection == null) {
+                    Log.w(TAG, "📱 MediaProjection unavailable");
+                    postPhoneScreenSkip("projection_unavailable", false);
+                    return;
+                }
+                mediaProjection.registerCallback(new MediaProjection.Callback() {
+                    @Override
+                    public void onStop() {
+                        synchronized (phoneScreenLock) {
+                            stopPhoneScreenProjectionLocked();
+                        }
+                    }
+                }, mainHandler);
+
+                DisplayMetrics dm = getResources().getDisplayMetrics();
+                int rawW = Math.max(1, dm.widthPixels);
+                int rawH = Math.max(1, dm.heightPixels);
+                float scale = Math.min(1f, 1080f / Math.max(rawW, rawH));
+                int capW = Math.max(1, Math.round(rawW * scale));
+                int capH = Math.max(1, Math.round(rawH * scale));
+
+                phoneScreenReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
+                phoneScreenDisplay = mediaProjection.createVirtualDisplay(
+                        "AionPhoneScreen",
+                        capW,
+                        capH,
+                        dm.densityDpi,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                        phoneScreenReader.getSurface(),
+                        null,
+                        mainHandler
+                );
+                phoneScreenEnabled = true;
+                Log.i(TAG, "📱 phone screen projection ready " + capW + "x" + capH);
+            } catch (Exception e) {
+                Log.e(TAG, "📱 start projection failed: " + e.getMessage());
+                postPhoneScreenSkip("projection_start_failed:" + e.getClass().getSimpleName(), false);
+                stopPhoneScreenProjectionLocked();
+            }
+        }
+    }
+
+    private void stopPhoneScreenProjection() {
+        synchronized (phoneScreenLock) {
+            stopPhoneScreenProjectionLocked();
+        }
+    }
+
+    private void stopPhoneScreenProjectionLocked() {
+        phoneScreenEnabled = false;
+        if (phoneScreenDisplay != null) {
+            try { phoneScreenDisplay.release(); } catch (Exception ignored) {}
+            phoneScreenDisplay = null;
+        }
+        if (phoneScreenReader != null) {
+            try { phoneScreenReader.close(); } catch (Exception ignored) {}
+            phoneScreenReader = null;
+        }
+        if (mediaProjection != null) {
+            MediaProjection oldProjection = mediaProjection;
+            mediaProjection = null;
+            try { oldProjection.stop(); } catch (Exception ignored) {}
+        }
+    }
+
+    private void updateForegroundForProjection() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            int serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                    | ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                    == PackageManager.PERMISSION_GRANTED) {
+                serviceType |= ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+            }
+            startForeground(NOTIF_FOREGROUND, buildKeepAlive("在线 ✨ · 手机屏幕监督已开启"), serviceType);
+        } else {
+            startForeground(NOTIF_FOREGROUND, buildKeepAlive("在线 ✨ · 手机屏幕监督已开启"));
+        }
+    }
+
+    private void schedulePhoneScreenCapture(String reason) {
+        if (System.currentTimeMillis() - lastPhoneCaptureAt < 3000) return;
+        lastPhoneCaptureAt = System.currentTimeMillis();
+        new Thread(() -> {
+            try { Thread.sleep(4200); } catch (InterruptedException ignored) {}
+            captureAndUploadPhoneScreen(reason);
+        }, "PhoneScreenCapture").start();
+    }
+
+    private boolean isPhoneUnlockedForCapture() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH && !pm.isInteractive()) {
+                return false;
+            }
+            KeyguardManager kg = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+            if (kg != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && kg.isDeviceLocked()) return false;
+                if (kg.isKeyguardLocked()) return false;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "📱 lock state check failed: " + e.getMessage());
+            return false;
+        }
+        return screenOn;
+    }
+
+    private void captureAndUploadPhoneScreen(String reason) {
+        if (!phoneScreenEnabled || phoneScreenReader == null) {
+            postPhoneScreenSkip("no_projection", false);
+            return;
+        }
+        if (!isPhoneUnlockedForCapture()) {
+            postPhoneScreenSkip("locked", true);
+            return;
+        }
+
+        Image image = null;
+        Bitmap bitmap = null;
+        Bitmap cropped = null;
+        Bitmap scaled = null;
+        try {
+            synchronized (phoneScreenLock) {
+                if (phoneScreenReader == null) return;
+                image = phoneScreenReader.acquireLatestImage();
+            }
+            if (image == null) {
+                try { Thread.sleep(250); } catch (InterruptedException ignored) {}
+                synchronized (phoneScreenLock) {
+                    if (phoneScreenReader == null) return;
+                    image = phoneScreenReader.acquireLatestImage();
+                }
+            }
+            if (image == null) {
+                postPhoneScreenSkip("no_frame", false);
+                return;
+            }
+
+            int width = image.getWidth();
+            int height = image.getHeight();
+            Image.Plane plane = image.getPlanes()[0];
+            ByteBuffer buffer = plane.getBuffer();
+            int pixelStride = plane.getPixelStride();
+            int rowStride = plane.getRowStride();
+            int rowPadding = rowStride - pixelStride * width;
+            int paddedWidth = width + rowPadding / pixelStride;
+
+            bitmap = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888);
+            bitmap.copyPixelsFromBuffer(buffer);
+            cropped = Bitmap.createBitmap(bitmap, 0, 0, width, height);
+
+            float scale = Math.min(1f, 1080f / Math.max(width, height));
+            if (scale < 1f) {
+                int sw = Math.max(1, Math.round(width * scale));
+                int sh = Math.max(1, Math.round(height * scale));
+                scaled = Bitmap.createScaledBitmap(cropped, sw, sh, true);
+            } else {
+                scaled = cropped;
+            }
+
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            scaled.compress(Bitmap.CompressFormat.JPEG, 82, out);
+            String b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+            uploadPhoneScreenBase64(b64, reason);
+        } catch (Exception e) {
+            Log.e(TAG, "📱 capture failed: " + e.getMessage());
+            postPhoneScreenSkip("capture_failed", false);
+        } finally {
+            if (image != null) try { image.close(); } catch (Exception ignored) {}
+            if (bitmap != null) bitmap.recycle();
+            if (cropped != null && cropped != scaled) cropped.recycle();
+            if (scaled != null) scaled.recycle();
+        }
+    }
+
+    private String getHttpBase() {
+        if (serverUrl == null) return null;
+        return serverUrl.replace("ws://", "http://")
+                .replace("wss://", "https://")
+                .replace("/ws", "");
+    }
+
+    private void uploadPhoneScreenBase64(String b64, String reason) {
+        String httpBase = getHttpBase();
+        if (httpBase == null) return;
+        try {
+            JSONObject body = new JSONObject();
+            body.put("image_base64", b64);
+            body.put("timestamp", System.currentTimeMillis() / 1000.0);
+            body.put("app", lastReportedApp);
+            body.put("locked", false);
+            body.put("reason", reason);
+            MediaType JSON_TYPE = MediaType.get("application/json; charset=utf-8");
+            RequestBody reqBody = RequestBody.create(body.toString(), JSON_TYPE);
+            Request req = new Request.Builder()
+                    .url(httpBase + "/api/phone-screen/upload")
+                    .post(reqBody)
+                    .build();
+            try (Response resp = client.newCall(req).execute()) {
+                Log.i(TAG, "📱 phone screen uploaded → " + resp.code());
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "📱 phone screen upload failed: " + e.getMessage());
+        }
+    }
+
+    private void postPhoneScreenSkip(String reason, boolean locked) {
+        String httpBase = getHttpBase();
+        if (httpBase == null || client == null) return;
+        try {
+            JSONObject body = new JSONObject();
+            body.put("reason", reason);
+            body.put("app", lastReportedApp);
+            body.put("locked", locked);
+            MediaType JSON_TYPE = MediaType.get("application/json; charset=utf-8");
+            RequestBody reqBody = RequestBody.create(body.toString(), JSON_TYPE);
+            Request req = new Request.Builder()
+                    .url(httpBase + "/api/phone-screen/skip")
+                    .post(reqBody)
+                    .build();
+            try (Response resp = client.newCall(req).execute()) {
+                Log.d(TAG, "📱 phone screen skipped " + reason + " → " + resp.code());
+            }
+        } catch (Exception e) {
+            Log.d(TAG, "📱 phone screen skip report failed: " + e.getMessage());
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════
     //  通知渠道
     // ══════════════════════════════════════════════════════════
 
@@ -1158,10 +1458,51 @@ public class AionPushService extends Service {
             Log.w(TAG, "\uD83D\uDC63 No step counter sensor on this device");
             return;
         }
+        // 重装 APK 后 SharedPreferences 丢失，尝试从服务端恢复步数基线
+        SharedPreferences prefs = getSharedPreferences("aion_prefs", MODE_PRIVATE);
+        if (prefs.getFloat(PREF_STEP_DAY_START, -1) < 0) {
+            stepRestorePending = true;
+            restoreStepStateFromServer();
+        }
         // 传感器回调必须在有 Looper 的线程上注册，用主线程 Handler
         sensorManager.registerListener(stepListener, stepSensor,
                 SensorManager.SENSOR_DELAY_NORMAL, mainHandler);
         Log.i(TAG, "\uD83D\uDC63 Step counter sensor registered (mainHandler)");
+    }
+
+    /**
+     * 从服务端恢复步数状态（重装 APK 后 SharedPreferences 丢失时调用）
+     */
+    private void restoreStepStateFromServer() {
+        if (serverUrl == null) {
+            stepRestorePending = false;
+            return;
+        }
+        new Thread(() -> {
+            try {
+                String httpBase = serverUrl.replace("ws://", "http://")
+                        .replace("wss://", "https://")
+                        .replace("/ws", "");
+                String apiUrl = httpBase + "/api/location/step-state";
+                Request req = new Request.Builder().url(apiUrl).get().build();
+                try (Response resp = client.newCall(req).execute()) {
+                    String body = resp.body() != null ? resp.body().string() : "";
+                    JSONObject json = new JSONObject(body);
+                    int steps = json.optInt("steps", -1);
+                    String date = json.optString("logical_date", "");
+                    if (steps > 0 && date.equals(getLogicalDate())) {
+                        serverStepRestore = steps;
+                        Log.i(TAG, "\uD83D\uDC63 Restored step state from server: " + steps + " steps for " + date);
+                    } else {
+                        Log.i(TAG, "\uD83D\uDC63 No matching step state on server (steps=" + steps + " date=" + date + " today=" + getLogicalDate() + ")");
+                    }
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "\uD83D\uDC63 Failed to restore step state: " + e.getMessage());
+            } finally {
+                stepRestorePending = false;
+            }
+        }).start();
     }
 
     private final SensorEventListener stepListener = new SensorEventListener() {
@@ -1181,11 +1522,23 @@ public class AionPushService extends Service {
 
             // 首次启动或跨逻辑日 → 重置
             if (!logicalDate.equals(savedDate) || dayStart < 0) {
+                // 等待服务端恢复完成（重装 APK 场景）
+                if (dayStart < 0 && stepRestorePending) {
+                    Log.d(TAG, "\uD83D\uDC63 Waiting for server step restore...");
+                    return;
+                }
+                // 重装 APK 后从服务端恢复的步数作为 rebootOffset
+                float restoreOffset = 0;
+                if (dayStart < 0 && serverStepRestore > 0) {
+                    restoreOffset = serverStepRestore;
+                    serverStepRestore = -1;
+                    Log.i(TAG, "\uD83D\uDC63 Using server-restored steps as offset: " + (int) restoreOffset);
+                }
                 Log.i(TAG, "\uD83D\uDC63 Step reset for logical day " + logicalDate
-                        + " (was " + savedDate + ")");
+                        + " (was " + savedDate + ") restoreOffset=" + (int) restoreOffset);
                 prefs.edit()
                         .putFloat(PREF_STEP_DAY_START, currentCounter)
-                        .putFloat(PREF_STEP_REBOOT_OFFSET, 0)
+                        .putFloat(PREF_STEP_REBOOT_OFFSET, restoreOffset)
                         .putFloat(PREF_STEP_LAST_KNOWN, currentCounter)
                         .putString(PREF_STEP_RESET_DATE, logicalDate)
                         .apply();

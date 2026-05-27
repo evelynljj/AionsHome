@@ -31,6 +31,7 @@ class HeartbeatBody(BaseModel):
     force: bool = False      # 强制处理（即使未启用，如浏览器设家）
     steps: Optional[int] = None  # 今日步数（Android 步数传感器，可选）
     step_diag: Optional[str] = None  # 步数传感器诊断信息
+    step_logical_date: Optional[str] = None  # 步数逻辑日期（凌晨5点重置）
 
 @router.post("/api/location/heartbeat")
 async def location_heartbeat(body: HeartbeatBody):
@@ -46,6 +47,11 @@ async def location_heartbeat(body: HeartbeatBody):
         return {"ok": False, "error": "定位功能未启用"}
 
     result = await process_heartbeat(body.lng, body.lat, body.accuracy, body.is_gcj02, steps=body.steps)
+    # 保存步数逻辑日期（用于重装 APK 后恢复）
+    if body.step_logical_date and body.steps is not None:
+        status = load_location_status()
+        status["step_logical_date"] = body.step_logical_date
+        save_location_status(status)
     return {"ok": True, **result}
 
 
@@ -102,6 +108,16 @@ async def step_diag_report(body: StepDiagReport):
 async def get_step_diag():
     """获取最新的步数传感器诊断信息"""
     return _step_diag_info
+
+
+@router.get("/api/location/step-state")
+async def get_step_state():
+    """获取服务端保存的步数状态（用于重装 APK 后恢复）"""
+    status = load_location_status()
+    return {
+        "steps": status.get("steps"),
+        "logical_date": status.get("step_logical_date", ""),
+    }
 
 
 # ── 状态查询 ──────────────────────────────────────

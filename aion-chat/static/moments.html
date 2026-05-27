@@ -120,8 +120,11 @@
 }
 .comment-item {
   font-size:13px; line-height:1.5; padding:3px 0;
-  color:var(--text);
+  color:var(--text); cursor:pointer; user-select:none; -webkit-user-select:none;
+  -webkit-touch-callout:none;
 }
+.comment-item:active { background:var(--surface2); }
+.comment-text { word-break:break-word; }
 .comment-author {
   color:var(--accent); font-weight:500; cursor:pointer;
 }
@@ -164,6 +167,33 @@
 .comment-modal-btn:active { opacity:0.8; }
 .comment-modal-btn:disabled { opacity:0.5; cursor:not-allowed; }
 
+/* ── 评论长按菜单 ── */
+.comment-action-overlay {
+  position:fixed; inset:0; background:rgba(0,0,0,0.32);
+  z-index:210; display:flex; align-items:flex-end; justify-content:center;
+  opacity:0; pointer-events:none; transition:opacity 0.18s;
+}
+.comment-action-overlay.show { opacity:1; pointer-events:auto; }
+.comment-action-menu {
+  width:100%; max-width:420px; background:var(--surface);
+  border-radius:14px 14px 0 0; padding:8px 12px 18px;
+  box-shadow:0 -8px 28px rgba(0,0,0,0.18);
+  transform:translateY(20px); transition:transform 0.18s;
+}
+.comment-action-overlay.show .comment-action-menu { transform:translateY(0); }
+.comment-action-title {
+  font-size:12px; color:var(--text3); text-align:center;
+  padding:8px 0 10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.comment-action-btn {
+  width:100%; border:none; background:var(--bg); color:var(--text);
+  padding:12px 0; font-size:15px; cursor:pointer; border-radius:8px;
+  margin-top:8px;
+}
+.comment-action-btn:active { opacity:0.82; }
+.comment-action-btn.danger { color:var(--danger); }
+.comment-action-btn.cancel { color:var(--text3); }
+
 /* ── 加载更多 ── */
 .load-more-btn {
   display:block; margin:16px auto; padding:8px 24px;
@@ -196,11 +226,20 @@
   <div class="comment-overlay" id="commentOverlay" onclick="if(event.target===this)closeCommentModal()">
     <div class="comment-modal">
       <div class="comment-modal-title">
-        <span>写评论</span>
+        <span id="commentModalTitle">写评论</span>
         <button class="comment-modal-close" onclick="closeCommentModal()">✕</button>
       </div>
       <textarea class="comment-modal-input" id="commentModalInput" placeholder="写下你的评论..."></textarea>
       <button class="comment-modal-btn" id="commentModalBtn" onclick="submitComment()">发送</button>
+    </div>
+  </div>
+  <!-- 评论长按菜单 -->
+  <div class="comment-action-overlay" id="commentActionOverlay" onclick="if(event.target===this)closeCommentActionMenu()">
+    <div class="comment-action-menu">
+      <div class="comment-action-title" id="commentActionTitle">评论操作</div>
+      <button class="comment-action-btn" onclick="replySelectedComment()">回复</button>
+      <button class="comment-action-btn danger" onclick="deleteSelectedComment()">删除</button>
+      <button class="comment-action-btn cancel" onclick="closeCommentActionMenu()">取消</button>
     </div>
   </div>
   <div class="page-content">
@@ -337,7 +376,14 @@ function renderMomentCard(m) {
           replyTag = ` <span class="comment-reply-tag">回复</span> <span class="comment-author">${escapeHtml(getAuthorName(parent.author))}</span>`;
         }
       }
-      commentsHtml += `<div class="comment-item"><span class="comment-author">${escapeHtml(cName)}</span>${replyTag}：${escapeHtml(c.content)}</div>`;
+      commentsHtml += `<div class="comment-item"
+        onpointerdown="startCommentPress(event, '${m.id}', '${c.id}')"
+        onpointerup="cancelCommentPress()"
+        onpointercancel="cancelCommentPress()"
+        onpointerleave="cancelCommentPress()"
+        oncontextmenu="openCommentActionMenu('${m.id}', '${c.id}'); return false;">
+        <div class="comment-text"><span class="comment-author">${escapeHtml(cName)}</span>${replyTag}：${escapeHtml(c.content)}</div>
+      </div>`;
     }
     commentsHtml += '</div>';
   }
@@ -419,30 +465,115 @@ async function toggleReact(momentId, type) {
 
 // ── 评论弹窗 ──
 let _commentMomentId = null;
-function openCommentModal(momentId) {
+let _commentReplyToId = null;
+let _commentActionMomentId = null;
+let _commentActionCommentId = null;
+let _commentPressTimer = null;
+
+function findComment(momentId, commentId) {
+  const moment = allMoments.find(m => m.id === momentId);
+  return moment && (moment.comments || []).find(c => c.id === commentId);
+}
+
+function startCommentPress(event, momentId, commentId) {
+  if (event.button && event.button !== 0) return;
+  cancelCommentPress();
+  _commentPressTimer = setTimeout(() => {
+    _commentPressTimer = null;
+    openCommentActionMenu(momentId, commentId);
+  }, 520);
+}
+
+function cancelCommentPress() {
+  if (_commentPressTimer) {
+    clearTimeout(_commentPressTimer);
+    _commentPressTimer = null;
+  }
+}
+
+function openCommentActionMenu(momentId, commentId) {
+  cancelCommentPress();
+  _commentActionMomentId = momentId;
+  _commentActionCommentId = commentId;
+  const c = findComment(momentId, commentId);
+  const title = document.getElementById('commentActionTitle');
+  title.textContent = c ? `${getAuthorName(c.author)}：${c.content}` : '评论操作';
+  document.getElementById('commentActionOverlay').classList.add('show');
+}
+
+function closeCommentActionMenu() {
+  document.getElementById('commentActionOverlay').classList.remove('show');
+  _commentActionMomentId = null;
+  _commentActionCommentId = null;
+}
+
+function replySelectedComment() {
+  const momentId = _commentActionMomentId;
+  const commentId = _commentActionCommentId;
+  closeCommentActionMenu();
+  if (momentId && commentId) openCommentModal(momentId, commentId);
+}
+
+async function deleteSelectedComment() {
+  const momentId = _commentActionMomentId;
+  const commentId = _commentActionCommentId;
+  if (!momentId || !commentId) return;
+  if (!confirm('删除这条评论吗？')) return;
+  try {
+    await api('DELETE', `/api/moments/${momentId}/comments/${commentId}`);
+    const idx = allMoments.findIndex(m => m.id === momentId);
+    if (idx >= 0 && allMoments[idx].comments) {
+      allMoments[idx].comments = allMoments[idx].comments
+        .filter(c => c.id !== commentId)
+        .map(c => c.reply_to_id === commentId ? { ...c, reply_to_id: null } : c);
+      renderList();
+    }
+    closeCommentActionMenu();
+  } catch(e) {
+    showToast('删除评论失败');
+  }
+}
+
+function openCommentModal(momentId, replyToId = null) {
   _commentMomentId = momentId;
+  _commentReplyToId = replyToId;
   document.getElementById('commentOverlay').classList.add('show');
   const input = document.getElementById('commentModalInput');
+  const title = document.getElementById('commentModalTitle');
   input.value = '';
+  title.textContent = '写评论';
+  input.placeholder = '写下你的评论...';
+  if (replyToId) {
+    const target = findComment(momentId, replyToId);
+    if (target) {
+      const name = getAuthorName(target.author);
+      title.textContent = `回复 ${name}`;
+      input.placeholder = `回复 ${name}...`;
+    }
+  }
   setTimeout(() => input.focus(), 100);
 }
 function closeCommentModal() {
   document.getElementById('commentOverlay').classList.remove('show');
   _commentMomentId = null;
+  _commentReplyToId = null;
 }
 
 async function submitComment() {
   const input = document.getElementById('commentModalInput');
   const content = input.value.trim();
   if (!content || !_commentMomentId) return;
+  const momentId = _commentMomentId;
+  const payload = { content };
+  if (_commentReplyToId) payload.reply_to_id = _commentReplyToId;
   const btn = document.getElementById('commentModalBtn');
   btn.disabled = true;
   try {
-    await api('POST', `/api/moments/${_commentMomentId}/comments`, { content });
+    await api('POST', `/api/moments/${momentId}/comments`, payload);
     const res = await api('GET', `/api/moments?page=1&page_size=${totalItems || 100}`);
-    const updated = res.items.find(m => m.id === _commentMomentId);
+    const updated = res.items.find(m => m.id === momentId);
     if (updated) {
-      const idx = allMoments.findIndex(m => m.id === _commentMomentId);
+      const idx = allMoments.findIndex(m => m.id === momentId);
       if (idx >= 0) { allMoments[idx] = updated; renderList(); }
     }
     closeCommentModal();
@@ -494,6 +625,15 @@ function hookWS() {
           const idx = allMoments.findIndex(m => m.id === msg.data.moment_id);
           if (idx >= 0 && allMoments[idx].reactions) {
             allMoments[idx].reactions = allMoments[idx].reactions.filter(r => r.author !== msg.data.author);
+            renderList();
+          }
+        } else if (msg.type === 'moment_comment_deleted' && msg.data) {
+          const idx = allMoments.findIndex(m => m.id === msg.data.moment_id);
+          if (idx >= 0 && allMoments[idx].comments) {
+            const deletedId = msg.data.comment_id;
+            allMoments[idx].comments = allMoments[idx].comments
+              .filter(c => c.id !== deletedId)
+              .map(c => c.reply_to_id === deletedId ? { ...c, reply_to_id: null } : c);
             renderList();
           }
         }

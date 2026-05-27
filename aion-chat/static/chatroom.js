@@ -6,10 +6,16 @@ let rooms = [];
 let isSending = false;
 let isAiChatting = false;
 let chatroomModel = '';
+let chatroomConnorModel = 'Codex';
+let chatroomReplyOrder = 'random';
+let isReplyOnce = false;
+let chatroomModels = [];
 let pendingAttachments = [];  // [{url, type, name}]
+let crMessagesById = {};
 
 // ── 密语模式 ──
 let crWhisperMode = false;
+const crHandledToyEvents = new Set();
 
 const AVATARS = {
   user: '/public/UserIcon.png',
@@ -49,6 +55,17 @@ function applyChatroomNames(cfg = {}) {
   if (optAion) optAion.textContent = `${crAiName} 优先`;
   const optConnor = document.getElementById('optConnor');
   if (optConnor) optConnor.textContent = `${crConnorName} 优先`;
+  const replyAionBtn = document.getElementById('replyAionBtn');
+  if (replyAionBtn) replyAionBtn.textContent = `${crAiName} 说`;
+  const replyConnorBtn = document.getElementById('replyConnorBtn');
+  if (replyConnorBtn) replyConnorBtn.textContent = `${crConnorName} 说`;
+  const aionModelLabel = document.querySelector('#fieldAionModel label');
+  if (aionModelLabel) aionModelLabel.textContent = `${crAiName} 模型线路`;
+  const connorModelLabel = document.querySelector('#fieldConnorModel label');
+  if (connorModelLabel) connorModelLabel.textContent = `${crConnorName} 模型线路`;
+  const personaSummary = document.getElementById('settingsPersonaSummary');
+  if (personaSummary) personaSummary.textContent = `${crAiName} / ${crConnorName} 补充设定`;
+  updateHeaderActions();
 }
 
 // ── 音效 ──
@@ -208,6 +225,26 @@ let crTtsAudio = _ttsEngine.audio;
 let crMusicCards = {}; // { msgId: [{ id, name, artist, album, cover, audio_url, candidates }] }
 
 // ── 密语胶囊 ──
+function crToyLabel(cmd) {
+  const c = String(cmd || '').trim().toUpperCase();
+  if (c === 'STOP' || c === '0') return '❤️ 停止';
+  const n = parseInt(c);
+  return (n >= 1 && n <= 9) ? `❤️ ${CR_TOY_PNAMES[n - 1]}` : `❤️ ${cmd}`;
+}
+
+function crToyCommandsFromAttachments(atts) {
+  if (!Array.isArray(atts)) return [];
+  return atts
+    .filter(item => item && typeof item === 'object' && item.type === 'toy')
+    .flatMap(item => Array.isArray(item.commands) ? item.commands : (item.command ? [item.command] : []));
+}
+
+function renderToyAttachments(atts) {
+  const commands = crToyCommandsFromAttachments(atts);
+  if (!commands.length) return '';
+  return commands.map(cmd => `<div class="toy-capsule" data-toy-command="${esc(String(cmd))}">${esc(crToyLabel(cmd))}</div>`).join('');
+}
+
 function crShowToyCapsule(msgId, commands) {
   if (!msgId || !commands || !commands.length) return;
   const row = document.querySelector(`[data-msg-id="${msgId}"]`) || document.getElementById(`streaming-${msgId}`);
@@ -215,16 +252,37 @@ function crShowToyCapsule(msgId, commands) {
   const msgContent = row.querySelector('.msg-content');
   if (!msgContent) return;
   commands.forEach(cmd => {
-    const c = cmd.trim().toUpperCase();
-    let label;
-    if (c === 'STOP' || c === '0') label = '❤️ 停止';
-    else { const n = parseInt(c); label = (n >= 1 && n <= 9) ? `❤️ ${CR_TOY_PNAMES[n-1]}` : `❤️ ${cmd}`; }
+    const c = String(cmd || '').trim().toUpperCase();
+    if (!c) return;
+    if (msgContent.querySelector(`.toy-capsule[data-toy-command="${c}"]`)) return;
     const pill = document.createElement('div');
     pill.className = 'toy-capsule';
-    pill.textContent = label;
+    pill.dataset.toyCommand = c;
+    pill.textContent = crToyLabel(cmd);
     msgContent.appendChild(pill);
   });
   scrollToBottom();
+}
+
+function crHandleToyCommand(data) {
+  if (!data || !data.commands || !data.commands.length) return;
+  const msgId = data.msg_id || '';
+  const commands = data.commands.map(c => String(c || '').trim().toUpperCase()).filter(Boolean);
+  if (!commands.length) return;
+  const key = `${msgId}:${commands.join('|')}`;
+  const alreadyHandled = crHandledToyEvents.has(key);
+  if (!alreadyHandled) {
+    crHandledToyEvents.add(key);
+    try {
+      if (window.opener && window.opener.toyExecCmd) {
+        commands.forEach(c => window.opener.toyExecCmd(c));
+      } else if (window.parent && window.parent !== window && window.parent.toyExecCmd) {
+        commands.forEach(c => window.parent.toyExecCmd(c));
+      }
+    } catch(e) {}
+    if (typeof toyExecCmd === 'function') commands.forEach(c => toyExecCmd(c));
+  }
+  crShowToyCapsule(msgId, commands);
 }
 
 function crRenderMusicCards(msgId) {
@@ -432,7 +490,7 @@ function onTtsToggleChange() {
 }
 
 function onWhisperToggleChange() {
-  crWhisperMode = document.getElementById('setWhisperMode').checked;
+  crWhisperMode = !!document.getElementById('setWhisperMode')?.checked;
 }
 
 async function crLoadTTSVoices() {
@@ -479,6 +537,8 @@ const backdrop = document.getElementById('sidebarBackdrop');
 const connorDot = document.getElementById('connorDot');
 const connorStatusEl = document.getElementById('connorStatus');
 const aiChatBtn = document.getElementById('aiChatBtn');
+const replyAionBtn = document.getElementById('replyAionBtn');
+const replyConnorBtn = document.getElementById('replyConnorBtn');
 const toastEl = document.getElementById('toast');
 
 // ══════════════════════════════════════════════════
@@ -538,11 +598,32 @@ async function api(path, opts = {}) {
 
 async function fetchCurrentModel() {
   try {
-    const convs = await (await fetch('/api/conversations')).json();
+    const [convs, models, cfg] = await Promise.all([
+      (await fetch('/api/conversations')).json(),
+      (await fetch('/api/models')).json(),
+      api('/config'),
+    ]);
+    if (Array.isArray(models)) chatroomModels = models;
+    if (cfg?.connor_model) chatroomConnorModel = cfg.connor_model;
+    if (cfg?.reply_order) chatroomReplyOrder = cfg.reply_order;
     if (Array.isArray(convs) && convs.length > 0 && convs[0].model) {
       chatroomModel = convs[0].model;
     }
+    updateHeaderActions();
   } catch {}
+}
+
+function renderModelOptions(selected) {
+  const keys = chatroomModels.length ? chatroomModels.map(m => m.key) : [chatroomModel || 'Codex', 'Codex'];
+  return [...new Set(keys.filter(Boolean))].map(k => `<option value="${esc(k)}"${k === selected ? ' selected' : ''}>${esc(k)}</option>`).join('');
+}
+
+function updateHeaderActions() {
+  const isGroup = currentRoom && currentRoom.type === 'group';
+  const manualMode = isGroup && chatroomReplyOrder === 'manual';
+  if (aiChatBtn) aiChatBtn.style.display = isGroup ? '' : 'none';
+  if (replyAionBtn) replyAionBtn.style.display = manualMode ? '' : 'none';
+  if (replyConnorBtn) replyConnorBtn.style.display = manualMode ? '' : 'none';
 }
 
 // ══════════════════════════════════════════════════
@@ -634,7 +715,7 @@ async function selectRoom(roomId) {
     document.getElementById('crVoiceModeRow').classList.remove('active');
   }
   composer.style.display = 'flex';
-  aiChatBtn.style.display = room.type === 'group' ? '' : 'none';
+  updateHeaderActions();
   await loadMessages();
   closeSidebar();
 }
@@ -675,6 +756,7 @@ async function loadOlderMessages() {
   // 将旧消息插入到顶部
   const fragment = document.createDocumentFragment();
   msgs.forEach(m => {
+    if (m.id) crMessagesById[m.id] = m;
     const div = document.createElement('div');
     div.innerHTML = msgHTML(m);
     fragment.appendChild(div.firstElementChild);
@@ -686,6 +768,7 @@ async function loadOlderMessages() {
 }
 
 function renderMessages(msgs) {
+  crMessagesById = {};
   if (!msgs || !msgs.length) {
     messagesEl.innerHTML = `
       <div class="empty-state">
@@ -694,6 +777,7 @@ function renderMessages(msgs) {
       </div>`;
     return;
   }
+  msgs.forEach(m => { if (m.id) crMessagesById[m.id] = m; });
   messagesEl.innerHTML = msgs.map(m => msgHTML(m)).join('');
 }
 
@@ -732,14 +816,19 @@ function msgHTML(m) {
   }
 
   // 渲染附件图片
+  const toyHtml = renderToyAttachments(m.attachments);
   const attHtml = renderAttachments(m.attachments);
 
   const msgId = m.id || '';
+  const actionHtml = isUser
+    ? `<button onclick="editChatroomMsg('${msgId}');closeMsgMenus()">编辑</button>`
+    : `<button onclick="regenerateChatroomMsg('${msgId}');closeMsgMenus()">重新生成</button>`;
   const menuHtml = msgId ? `
     <div class="msg-menu-wrap">
       <button class="msg-menu-btn" onclick="toggleMsgMenu(event)">⋯</button>
       <div class="msg-menu-dropdown">
-        <button onclick="deleteMsg('${msgId}', this)">删除</button>
+        ${actionHtml}
+        <button class="danger" onclick="deleteMsg('${msgId}', this)">删除</button>
       </div>
     </div>` : '';
 
@@ -759,6 +848,7 @@ function msgHTML(m) {
         <div class="msg-content">
           ${senderLine}
           ${bubblesHtml}
+          ${toyHtml}
           ${attHtml}
         </div>
       </div>
@@ -775,12 +865,149 @@ function toggleMsgMenu(e) {
   dropdown.classList.toggle('show');
 }
 
+function closeMsgMenus() {
+  document.querySelectorAll('.msg-menu-dropdown.show').forEach(d => d.classList.remove('show'));
+}
+
 async function deleteMsg(msgId, btnEl) {
   try {
     await fetch(`${API}/messages/${msgId}`, { method: 'DELETE' });
+    delete crMessagesById[msgId];
     const row = document.querySelector(`[data-msg-id="${msgId}"]`);
     if (row) row.remove();
   } catch (e) { console.error('删除失败', e); }
+}
+
+function removeRowsAfter(row, includeSelf = false) {
+  if (!row) return;
+  let n = includeSelf ? row : row.nextElementSibling;
+  while (n) {
+    const next = n.nextElementSibling;
+    const id = n.getAttribute?.('data-msg-id');
+    if (id) delete crMessagesById[id];
+    n.remove();
+    n = next;
+  }
+}
+
+async function consumeChatroomSSE(resp) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      try { handleSSE(JSON.parse(line.slice(6))); } catch {}
+    }
+  }
+}
+
+function editChatroomMsg(msgId) {
+  const msg = crMessagesById[msgId];
+  if (!msg || msg.sender !== 'user' || isSending || isAiChatting) return;
+  const row = document.querySelector(`[data-msg-id="${msgId}"]`);
+  const bubble = row?.querySelector('.bubble');
+  if (!bubble) return;
+  row.classList.add('editing');
+  bubble.innerHTML = `
+    <textarea class="edit-textarea" id="edit_${msgId}"></textarea>
+    <div class="edit-actions">
+      <button class="edit-cancel" onclick="cancelChatroomEdit()">取消</button>
+      <button class="edit-save" onclick="saveChatroomEdit('${msgId}')">确认</button>
+    </div>`;
+  const ta = document.getElementById(`edit_${msgId}`);
+  ta.value = msg.content || '';
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+  ta.oninput = function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 160) + 'px';
+  };
+  ta.focus();
+}
+
+function cancelChatroomEdit() {
+  loadMessages();
+}
+
+async function saveChatroomEdit(msgId) {
+  const ta = document.getElementById(`edit_${msgId}`);
+  const msg = crMessagesById[msgId];
+  if (!ta || !msg || isSending || isAiChatting) return;
+  const content = ta.value.trim();
+  if (!content) { toast('内容不能为空'); return; }
+
+  isSending = true;
+  sendBtn.disabled = true;
+  msg.content = content;
+  const row = document.querySelector(`[data-msg-id="${msgId}"]`);
+  removeRowsAfter(row, false);
+  if (row) {
+    const div = document.createElement('div');
+    div.innerHTML = msgHTML(msg);
+    row.replaceWith(div.firstElementChild);
+  }
+
+  try {
+    const resp = await fetch(`${API}/messages/${msgId}/edit-resend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        model: chatroomModel,
+        connor_model: chatroomConnorModel,
+        tts_enabled: crTtsEnabled,
+        tts_aion_voice: crTtsAionVoice,
+        tts_connor_voice: crTtsConnorVoice,
+        whisper_mode: crWhisperMode,
+      }),
+    });
+    await consumeChatroomSSE(resp);
+  } catch (err) {
+    toast('编辑重发失败: ' + err.message);
+    await loadMessages();
+  } finally {
+    isSending = false;
+    sendBtn.disabled = false;
+    endStreamingBubble();
+    inputEl.focus();
+  }
+}
+
+async function regenerateChatroomMsg(msgId) {
+  const msg = crMessagesById[msgId];
+  if (!msg || msg.sender === 'user' || isSending || isAiChatting) return;
+  isSending = true;
+  sendBtn.disabled = true;
+  const row = document.querySelector(`[data-msg-id="${msgId}"]`);
+  removeRowsAfter(row, true);
+  try {
+    const resp = await fetch(`${API}/messages/${msgId}/regenerate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: chatroomModel,
+        connor_model: chatroomConnorModel,
+        tts_enabled: crTtsEnabled,
+        tts_aion_voice: crTtsAionVoice,
+        tts_connor_voice: crTtsConnorVoice,
+        whisper_mode: crWhisperMode,
+      }),
+    });
+    await consumeChatroomSSE(resp);
+  } catch (err) {
+    toast('重新生成失败: ' + err.message);
+    await loadMessages();
+  } finally {
+    isSending = false;
+    sendBtn.disabled = false;
+    endStreamingBubble();
+  }
 }
 
 // 点击空白处关闭下拉菜单
@@ -789,6 +1016,7 @@ document.addEventListener('click', () => {
 });
 
 function appendMessage(m) {
+  if (m?.id) crMessagesById[m.id] = m;
   // 移除空状态
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
@@ -798,8 +1026,23 @@ function appendMessage(m) {
 
   const div = document.createElement('div');
   div.innerHTML = msgHTML(m);
-  messagesEl.appendChild(div.firstElementChild);
+  const row = div.firstElementChild;
+  messagesEl.appendChild(row);
+  if (m?.id && crMemoryRecordMsgIds.has(m.id)) crApplyMemoryHint(m.id);
   scrollToBottom(m.sender === 'user');
+  return row;
+}
+
+function reconcileLocalUserEcho(msg) {
+  if (!msg || msg.sender !== 'user') return false;
+  if (msg.id) crMessagesById[msg.id] = msg;
+  const localRow = messagesEl.querySelector('.message-row.user[data-local-echo="1"]');
+  if (!localRow) return false;
+
+  const div = document.createElement('div');
+  div.innerHTML = msgHTML(msg);
+  localRow.replaceWith(div.firstElementChild);
+  return true;
 }
 
 function appendTyping(who) {
@@ -918,9 +1161,56 @@ function endStreamingBubble(attachments) {
     if (avatarCol && !avatarCol.querySelector('.tts-replay-btn')) {
       avatarCol.insertAdjacentHTML('beforeend', `<button class="tts-replay-btn" onclick="crReplayTTS('${msgId}')" title="重听语音">🔊</button>`);
     }
+    if (crMemoryRecordMsgIds.has(msgId)) crApplyMemoryHint(msgId);
+    crShowToyCapsule(msgId, crToyCommandsFromAttachments(attachments));
   }
   streamingBubble = null;
   streamingText = '';
+}
+
+// ── [MEMORY] 记忆录入提示 ──
+const crMemoryRecordMsgIds = new Set();
+const crMemoryRecordContent = {};
+
+function crShowMemoryRecordHint(msgId, content) {
+  if (!msgId) return;
+  crMemoryRecordMsgIds.add(msgId);
+  if (content) {
+    crMemoryRecordContent[msgId] = crMemoryRecordContent[msgId]
+      ? `${crMemoryRecordContent[msgId]}\n${content}`
+      : content;
+  }
+  crApplyMemoryHint(msgId);
+}
+
+function crApplyMemoryHint(msgId) {
+  const row = document.getElementById(`streaming-${msgId}`) || document.querySelector(`[data-msg-id="${msgId}"]`);
+  if (!row) return;
+  const avatarCol = row.querySelector('.msg-avatar-col');
+  if (!avatarCol || avatarCol.querySelector('.memory-record-hint')) return;
+  const hint = document.createElement('span');
+  hint.className = 'memory-record-hint';
+  hint.textContent = '💡';
+  hint.title = '已记录到记忆库';
+  hint.onclick = (e) => {
+    e.stopPropagation();
+    crShowMemoryRecordCard(msgId);
+  };
+  avatarCol.appendChild(hint);
+}
+
+function crShowMemoryRecordCard(msgId) {
+  const content = crMemoryRecordContent[msgId];
+  if (!content) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'mr-card-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `<div class="mr-card-popup">
+    <div class="mr-card-label">-- 已记录到记忆库 --</div>
+    <button class="mr-card-close" onclick="this.closest('.mr-card-overlay').remove()">x</button>
+    <div class="mr-card-text">${esc(content)}</div>
+  </div>`;
+  document.body.appendChild(overlay);
 }
 
 // ══════════════════════════════════════════════════
@@ -943,35 +1233,17 @@ composer.addEventListener('submit', async (e) => {
 
   // 立即显示用户消息
   playSend();
-  appendMessage({ sender: 'user', content: text, created_at: Date.now() / 1000, attachments });
+  const localRow = appendMessage({ sender: 'user', content: text, created_at: Date.now() / 1000, attachments });
+  if (localRow) localRow.dataset.localEcho = '1';
 
   try {
     const resp = await fetch(`${API}/rooms/${currentRoom.id}/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: text, model: chatroomModel, attachments, tts_enabled: crTtsEnabled, tts_aion_voice: crTtsAionVoice, tts_connor_voice: crTtsConnorVoice, whisper_mode: crWhisperMode }),
+      body: JSON.stringify({ content: text, model: chatroomModel, connor_model: chatroomConnorModel, attachments, tts_enabled: crTtsEnabled, tts_aion_voice: crTtsAionVoice, tts_connor_voice: crTtsConnorVoice, whisper_mode: crWhisperMode }),
     });
 
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const data = JSON.parse(line.slice(6));
-          handleSSE(data);
-        } catch {}
-      }
-    }
+    await consumeChatroomSSE(resp);
   } catch (err) {
     toast('发送失败: ' + err.message);
   } finally {
@@ -1058,6 +1330,9 @@ function handleSSE(data) {
     case 'system_msg':
       if (data.message) { appendMessage(data.message); }
       break;
+    case 'memory_record':
+      crShowMemoryRecordHint(data.msg_id, data.content);
+      break;
     case 'music':
       if (data.msg_id && data.cards) {
         crMusicCards[data.msg_id] = data.cards;
@@ -1067,20 +1342,7 @@ function handleSSE(data) {
       }
       break;
     case 'toy_command':
-      if (data.commands && data.commands.length) {
-        // 转发到主聊天页面的 BLE 执行器（如果在同一浏览器中打开）
-        try {
-          if (window.opener && window.opener.toyExecCmd) {
-            data.commands.forEach(c => window.opener.toyExecCmd(c));
-          } else if (window.parent && window.parent !== window && window.parent.toyExecCmd) {
-            data.commands.forEach(c => window.parent.toyExecCmd(c));
-          }
-        } catch(e) {}
-        // 本页如果有 BLE 连接也直接执行
-        if (typeof toyExecCmd === 'function') data.commands.forEach(c => toyExecCmd(c));
-        // 显示胶囊气泡
-        crShowToyCapsule(data.msg_id, data.commands);
-      }
+      crHandleToyCommand(data);
       break;
     case 'moment_new':
       // 朋友圈动态已移至独立页面
@@ -1104,7 +1366,7 @@ inputEl.addEventListener('keydown', (e) => {
 // ══════════════════════════════════════════════════
 
 async function triggerAiChat() {
-  if (!currentRoom || currentRoom.type !== 'group' || isAiChatting) return;
+  if (!currentRoom || currentRoom.type !== 'group' || isSending || isAiChatting || isReplyOnce) return;
   isAiChatting = true;
   aiChatBtn.disabled = true;
   aiChatBtn.textContent = '⏳ 互聊中...';
@@ -1113,29 +1375,10 @@ async function triggerAiChat() {
     const resp = await fetch(`${API}/rooms/${currentRoom.id}/ai-chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: chatroomModel, tts_enabled: crTtsEnabled, tts_aion_voice: crTtsAionVoice, tts_connor_voice: crTtsConnorVoice }),
+      body: JSON.stringify({ model: chatroomModel, connor_model: chatroomConnorModel, tts_enabled: crTtsEnabled, tts_aion_voice: crTtsAionVoice, tts_connor_voice: crTtsConnorVoice }),
     });
 
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const data = JSON.parse(line.slice(6));
-          handleSSE(data);
-        } catch {}
-      }
-    }
+    await consumeChatroomSSE(resp);
   } catch (err) {
     toast('AI 互聊失败: ' + err.message);
   } finally {
@@ -1144,6 +1387,48 @@ async function triggerAiChat() {
     aiChatBtn.textContent = '💬 让他们聊';
     endStreamingBubble();
     removeAiChatStatus();
+  }
+}
+
+async function triggerReplyOnce(speaker) {
+  if (!currentRoom || currentRoom.type !== 'group' || isSending || isAiChatting || isReplyOnce) return;
+  if (!['aion', 'connor'].includes(speaker)) return;
+
+  isReplyOnce = true;
+  isAiChatting = true;
+  if (replyAionBtn) replyAionBtn.disabled = true;
+  if (replyConnorBtn) replyConnorBtn.disabled = true;
+  if (aiChatBtn) aiChatBtn.disabled = true;
+  const activeBtn = speaker === 'aion' ? replyAionBtn : replyConnorBtn;
+  const oldText = activeBtn ? activeBtn.textContent : '';
+  if (activeBtn) activeBtn.textContent = `${crName(speaker)} 回复中...`;
+
+  try {
+    const resp = await fetch(`${API}/rooms/${currentRoom.id}/reply-once`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        speaker,
+        model: chatroomModel,
+        connor_model: chatroomConnorModel,
+        tts_enabled: crTtsEnabled,
+        tts_aion_voice: crTtsAionVoice,
+        tts_connor_voice: crTtsConnorVoice,
+        whisper_mode: crWhisperMode,
+      }),
+    });
+    await consumeChatroomSSE(resp);
+  } catch (err) {
+    toast(`${crName(speaker)} 回复失败: ` + err.message);
+  } finally {
+    isReplyOnce = false;
+    isAiChatting = false;
+    if (replyAionBtn) replyAionBtn.disabled = false;
+    if (replyConnorBtn) replyConnorBtn.disabled = false;
+    if (aiChatBtn) aiChatBtn.disabled = false;
+    if (activeBtn) activeBtn.textContent = oldText;
+    endStreamingBubble();
+    updateHeaderActions();
   }
 }
 
@@ -1156,6 +1441,8 @@ async function openSettings() {
 
   // 先立即打开面板，再异步填充数据（提升感知速度）
   document.getElementById('setTtsEnabled').checked = crTtsEnabled;
+  const personaFold = document.getElementById('settingsPersonaFold');
+  if (personaFold) personaFold.open = false;
   document.getElementById('settingsOverlay').classList.add('active');
 
   // 三个请求并行发起，避免串行等待外部服务超时
@@ -1172,19 +1459,27 @@ async function openSettings() {
   document.getElementById('setContextMin').value = room.context_minutes || 30;
   document.getElementById('setAiRounds').value = room.ai_chat_rounds || 1;
   document.getElementById('setConnorName').value = cfg.connor_name || 'Connor';
+  chatroomConnorModel = cfg.connor_model || chatroomConnorModel || 'Codex';
+  document.getElementById('setAionModel').innerHTML = renderModelOptions(chatroomModel);
+  document.getElementById('setConnorModel').innerHTML = renderModelOptions(chatroomConnorModel);
+  document.getElementById('setAionModel').value = chatroomModel || '';
+  document.getElementById('setConnorModel').value = chatroomConnorModel || 'Codex';
 
   // 回复顺序选项：用世界书和配置中的名字
   const aionName = crAiName;
   const connorName = crConnorName;
   document.getElementById('optAion').textContent = `${aionName} 优先`;
   document.getElementById('optConnor').textContent = `${connorName} 优先`;
+  chatroomReplyOrder = cfg.reply_order || 'random';
   document.getElementById('setReplyOrder').value = cfg.reply_order || 'random';
+  updateHeaderActions();
 
   // connor_1v1 隐藏群聊专属设置
   const isConnor1v1 = room.type === 'connor_1v1';
   document.getElementById('fieldAionPersona').style.display = isConnor1v1 ? 'none' : '';
   document.getElementById('fieldAiRounds').style.display = isConnor1v1 ? 'none' : '';
   document.getElementById('fieldReplyOrder').style.display = isConnor1v1 ? 'none' : '';
+  document.getElementById('fieldAionModel').style.display = isConnor1v1 ? 'none' : '';
 }
 
 function closeSettings() {
@@ -1208,13 +1503,17 @@ async function saveSettings() {
 
   // 保存 Connor 配置
   const nextConnorName = document.getElementById('setConnorName')?.value || crConnorName;
+  const nextReplyOrder = document.getElementById('setReplyOrder').value || 'random';
+  chatroomModel = document.getElementById('setAionModel')?.value || chatroomModel;
+  chatroomConnorModel = document.getElementById('setConnorModel')?.value || chatroomConnorModel || 'Codex';
   await api('/config', {
     method: 'PUT',
     body: JSON.stringify({
       connor_name: nextConnorName || undefined,
+      connor_model: chatroomConnorModel,
       tts_aion_voice: document.getElementById('setTtsAionVoice').value,
       tts_connor_voice: document.getElementById('setTtsConnorVoice').value,
-      reply_order: document.getElementById('setReplyOrder').value,
+      reply_order: nextReplyOrder,
     }),
   });
   applyChatroomNames({ connor_name: nextConnorName });
@@ -1224,6 +1523,8 @@ async function saveSettings() {
   // 同步本地变量
   crTtsAionVoice = document.getElementById('setTtsAionVoice').value;
   crTtsConnorVoice = document.getElementById('setTtsConnorVoice').value;
+  chatroomReplyOrder = nextReplyOrder;
+  updateHeaderActions();
 
   // 刷新
   currentRoom.title = document.getElementById('setTitle').value;
@@ -1432,8 +1733,9 @@ function crOpenDiary() {
 
 function renderEmptyChat() {
   roomTitleEl.textContent = '聊天室';
+  currentRoom = null;
   composer.style.display = 'none';
-  aiChatBtn.style.display = 'none';
+  updateHeaderActions();
   messagesEl.innerHTML = `
     <div class="empty-state">
       <div class="icon">💬</div>
@@ -1466,14 +1768,17 @@ function connectWS() {
         crFinishTTSForMsg(data.data.msg_id);
       }
 
+      if (data.type === 'memory_record' && data.data && !isSending && !isAiChatting) {
+        crShowMemoryRecordHint(data.data.msg_id, data.data.content);
+      }
+
       if (data.type === 'chatroom_msg_created' && currentRoom) {
         const msg = data.data;
         if (msg.room_id === currentRoom.id) {
-          // 避免重复：检查是否已经在页面上
+          // 避免重复：流式回复本身已有 streaming 行；异步跟进消息即使还在发送中也要显示。
           const existing = document.getElementById(`streaming-${msg.id}`);
           if (!existing && !messagesEl.querySelector(`[data-msg-id="${msg.id}"]`)) {
-            // 只在非发送状态下追加（发送时 SSE 已经处理了）
-            if (!isSending && !isAiChatting) {
+            if (!reconcileLocalUserEcho(msg)) {
               appendMessage(msg);
               playRecv();
             }
@@ -1484,8 +1789,22 @@ function connectWS() {
       if (data.type === 'chatroom_msg_deleted' && currentRoom) {
         const d = data.data;
         if (d.room_id === currentRoom.id) {
+          delete crMessagesById[d.id];
           const row = document.querySelector(`[data-msg-id="${d.id}"]`);
           if (row) row.remove();
+        }
+      }
+
+      if (data.type === 'chatroom_msg_updated' && currentRoom) {
+        const msg = data.data;
+        if (msg.room_id === currentRoom.id) {
+          crMessagesById[msg.id] = msg;
+          const row = document.querySelector(`[data-msg-id="${msg.id}"]`);
+          if (row) {
+            const div = document.createElement('div');
+            div.innerHTML = msgHTML(msg);
+            row.replaceWith(div.firstElementChild);
+          }
         }
       }
 
@@ -1506,15 +1825,7 @@ function connectWS() {
 
       // 玩具指令广播
       if (data.type === 'toy_command' && data.data) {
-        const d = data.data;
-        if (d.commands && d.commands.length) {
-          try {
-            if (window.opener && window.opener.toyExecCmd) d.commands.forEach(c => window.opener.toyExecCmd(c));
-            else if (window.parent && window.parent !== window && window.parent.toyExecCmd) d.commands.forEach(c => window.parent.toyExecCmd(c));
-          } catch(e) {}
-          if (typeof toyExecCmd === 'function') d.commands.forEach(c => toyExecCmd(c));
-          crShowToyCapsule(d.msg_id, d.commands);
-        }
+        crHandleToyCommand(data.data);
       }
 
       // Connor 钱包余额变动 → 自动刷新钱包面板
@@ -1540,7 +1851,9 @@ function renderAttachments(atts) {
   atts.forEach(item => {
     const url = typeof item === 'string' ? item : (item.url || '');
     const type = (typeof item === 'object' && item.type) || '';
-    if (type === 'voice') {
+    if (type === 'toy') {
+      return;
+    } else if (type === 'voice') {
       const dur = item.duration || 0;
       const durStr = dur < 60 ? `${Math.round(dur)}"` : `${Math.floor(dur/60)}'${Math.round(dur%60)}"`;
       const waveBars = Array.from({length: 6}, () => `<span style="height:${4 + Math.random()*14}px"></span>`).join('');
@@ -2081,7 +2394,8 @@ async function _crVoiceSend(audioBlob, duration) {
   const attachments = [voiceAtt.url];
   const voiceAttachmentsFull = [voiceAtt];
   playSend();
-  appendMessage({ sender: 'user', content: '', created_at: Date.now()/1000, attachments: voiceAttachmentsFull });
+  const localRow = appendMessage({ sender: 'user', content: '', created_at: Date.now()/1000, attachments: voiceAttachmentsFull });
+  if (localRow) localRow.dataset.localEcho = '1';
 
   try {
     const resp = await fetch(`${API}/rooms/${currentRoom.id}/send`, {
@@ -2434,6 +2748,8 @@ function crToyCloseEditor() { document.getElementById('crToyEditorOverlay').clas
     crTtsEnabled = !!cfg.tts_enabled;
     crTtsAionVoice = cfg.tts_aion_voice || '';
     crTtsConnorVoice = cfg.tts_connor_voice || '';
+    chatroomConnorModel = cfg.connor_model || 'Codex';
+    chatroomReplyOrder = cfg.reply_order || 'random';
   } catch(e) {}
   await fetchCurrentModel();
   await loadRooms();

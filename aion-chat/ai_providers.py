@@ -341,9 +341,9 @@ async def call_gemini(messages: list, model: str, meta: dict | None = None, temp
                     except:
                         pass
 
-# ── AiPro 中转站 ────────────────────────────────────────https://vip.aipro.love
+# ── AiPro 中转站 Deepseek ────────────────────────────────────────https://vip.aipro.love
 async def call_aipro(messages: list, model: str, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None):
-    url = "https://vip.aipro.love/v1/chat/completions"	
+    url = "https://api.deepseek.com/v1/chat/completions"	
     headers = {"Authorization": f"Bearer {get_key('aipro')}", "Content-Type": "application/json"}
     api_messages = build_multimodal_messages(messages)
     payload = {"model": model, "messages": api_messages, "stream": True}

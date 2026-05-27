@@ -419,6 +419,52 @@ async def init_db():
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_bookkeeping_created ON bookkeeping(created_at DESC)")
+        # ── 健康数据表 ──
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS health_ring_latest (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                device_name TEXT DEFAULT '',
+                heart_rate INTEGER,
+                systolic_bp INTEGER,
+                diastolic_bp INTEGER,
+                spo2 INTEGER,
+                hrv REAL,
+                measured_at REAL,
+                sleep_start_at REAL,
+                sleep_end_at REAL,
+                sleep_total_min INTEGER,
+                sleep_deep_min INTEGER,
+                sleep_light_min INTEGER,
+                sleep_rem_min INTEGER,
+                sleep_wake_min INTEGER,
+                sleep_wake_count INTEGER,
+                raw_json TEXT DEFAULT '',
+                synced_at REAL NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS health_weight_entries (
+                date TEXT PRIMARY KEY,
+                weight_kg REAL NOT NULL,
+                note TEXT DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_health_weight_date ON health_weight_entries(date DESC)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS health_period_entries (
+                id TEXT PRIMARY KEY,
+                start_date TEXT NOT NULL,
+                end_date TEXT DEFAULT '',
+                flow TEXT DEFAULT '',
+                symptoms TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_health_period_start ON health_period_entries(start_date DESC)")
         await db.commit()
 
 

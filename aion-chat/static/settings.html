@@ -43,6 +43,15 @@
       <input class="form-input" type="text" id="embeddingModelInput" placeholder="例：Qwen/Qwen3-Embedding-8B" autocomplete="off" style="font-family:monospace">
     </div>
 
+    <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
+      <label class="form-label" style="font-size:15px;color:#ff8359">📱 手机屏幕监督</label>
+      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">Android App 可开启。查岗提示音后，未锁屏时自动截取当前手机画面。</p>
+      <div class="btn-row" style="justify-content:flex-start;margin-top:8px">
+        <button class="btn-save" type="button" onclick="enablePhoneScreenSupervision()">开启授权</button>
+        <button class="btn-cancel" type="button" onclick="disablePhoneScreenSupervision()">关闭</button>
+      </div>
+    </div>
+
     <label class="form-label">硅基流动 API Key</label>
     <input class="form-input" type="text" id="sfKeyInput" placeholder="输入硅基流动 API Key..." autocomplete="off" style="font-family:monospace">
     <label class="form-label">中转站 API Key</label>
@@ -89,6 +98,22 @@ async function saveSettings() {
     netease_music_u: $("neteaseMusicUInput").value.trim()
   });
   showToast("✅ 已保存");
+}
+
+function enablePhoneScreenSupervision() {
+  if (!window.AionPhoneScreen || !window.AionPhoneScreen.requestPermission) {
+    showToast("需要在 Android App 里开启");
+    return;
+  }
+  window.AionPhoneScreen.requestPermission();
+}
+
+function disablePhoneScreenSupervision() {
+  if (!window.AionPhoneScreen || !window.AionPhoneScreen.stop) {
+    showToast("需要在 Android App 里关闭");
+    return;
+  }
+  window.AionPhoneScreen.stop();
 }
 </script>
 </body>

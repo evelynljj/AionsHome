@@ -88,9 +88,16 @@ def _format_moment_for_prompt(moment: dict) -> str:
     comments = moment.get("comments", [])
     if comments:
         lines.append("评论：")
+        comment_map = {c["id"]: c for c in comments}
         for c in comments:
             c_author = name_map.get(c["author"], c["author"])
-            lines.append(f"  {c_author}：{c['content']}")
+            reply_to = ""
+            if c.get("reply_to_id"):
+                parent = comment_map.get(c["reply_to_id"])
+                if parent:
+                    parent_author = name_map.get(parent["author"], parent["author"])
+                    reply_to = f" 回复 {parent_author}"
+            lines.append(f"  {c_author}{reply_to}：{c['content']}")
 
     return "\n".join(lines)
 
@@ -230,14 +237,28 @@ def _build_moment_reply_messages(
     if target_comment_id:
         # 回复某条评论
         target_comment = None
+        parent_comment = None
         for c in moment.get("comments", []):
             if c["id"] == target_comment_id:
                 target_comment = c
                 break
         if target_comment:
+            if target_comment.get("reply_to_id"):
+                for c in moment.get("comments", []):
+                    if c["id"] == target_comment["reply_to_id"]:
+                        parent_comment = c
+                        break
             commenter = name_map.get(target_comment["author"], target_comment["author"])
+            reply_context = ""
+            if parent_comment:
+                parent_author = name_map.get(parent_comment["author"], parent_comment["author"])
+                if parent_comment["author"] == who:
+                    reply_context = f"TA刚刚是在回复你的评论：「{parent_comment['content']}」\n"
+                else:
+                    reply_context = f"TA刚刚是在回复{parent_author}的评论：「{parent_comment['content']}」\n"
             messages.append({"role": "user", "content": (
-                f"[任务] {commenter}在你的朋友圈下评论了：「{target_comment['content']}」\n"
+                f"[任务] {commenter}在这条朋友圈下评论了：「{target_comment['content']}」\n"
+                f"{reply_context}"
                 f"请你作为{my_name}，用简短自然的语气回复这条评论。"
                 f"直接输出回复内容，不要加任何前缀标记。"
             )})
@@ -505,15 +526,36 @@ class CommentCreate(BaseModel):
 
 @router.post("/{moment_id}/comments")
 async def add_comment(moment_id: str, body: CommentCreate):
-    """用户发表评论，触发对应 AI 回复"""
+    """用户发表评论，若回复到 AI 评论则只触发被回复的 AI。"""
     content = body.content.strip()
     if not content:
         return {"error": "评论内容不能为空"}
 
     now = time.time()
     comment_id = f"mc_{int(now * 1000)}_u"
+    target_ai_author = None
 
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT author FROM moments WHERE id=?", (moment_id,))
+        moment_row = await cur.fetchone()
+        if not moment_row:
+            return {"error": "朋友圈不存在"}
+
+        if body.reply_to_id:
+            cur = await db.execute(
+                "SELECT author FROM moment_comments WHERE id=? AND moment_id=?",
+                (body.reply_to_id, moment_id),
+            )
+            parent_comment = await cur.fetchone()
+            if not parent_comment:
+                return {"error": "被回复的评论不存在"}
+            if parent_comment["author"] in ("aion", "connor"):
+                target_ai_author = parent_comment["author"]
+        elif moment_row["author"] in ("aion", "connor"):
+            # 用户直接评论了 AI 的朋友圈，让朋友圈作者回复。
+            target_ai_author = moment_row["author"]
+
         await db.execute(
             "INSERT INTO moment_comments (id, moment_id, author, content, reply_to_id, created_at) "
             "VALUES (?,?,?,?,?,?)",
@@ -527,19 +569,39 @@ async def add_comment(moment_id: str, body: CommentCreate):
     }
     await ws_manager.broadcast({"type": "moment_comment", "data": comment_data})
 
-    # 查询朋友圈作者，触发对应 AI 回复
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT author FROM moments WHERE id=?", (moment_id,))
-        row = await cur.fetchone()
-        if row and row["author"] in ("aion", "connor"):
-            # 用户评论了 AI 的朋友圈，让这个 AI 回复
-            asyncio.create_task(_ai_reply_to_moment(row["author"], moment_id, comment_id))
-        elif row and row["author"] == "user":
-            # 用户评论了自己的朋友圈——不触发额外 AI 回复
-            pass
+    if target_ai_author:
+        asyncio.create_task(_ai_reply_to_moment(target_ai_author, moment_id, comment_id))
 
     return comment_data
+
+
+@router.delete("/{moment_id}/comments/{comment_id}")
+async def delete_comment(moment_id: str, comment_id: str):
+    """删除单条朋友圈评论，保留它下面已有的后续评论。"""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT id FROM moment_comments WHERE id=? AND moment_id=?",
+            (comment_id, moment_id),
+        )
+        existing = await cur.fetchone()
+        if not existing:
+            return {"error": "评论不存在"}
+
+        await db.execute(
+            "UPDATE moment_comments SET reply_to_id=NULL WHERE moment_id=? AND reply_to_id=?",
+            (moment_id, comment_id),
+        )
+        await db.execute(
+            "DELETE FROM moment_comments WHERE id=? AND moment_id=?",
+            (comment_id, moment_id),
+        )
+        await db.commit()
+
+    await ws_manager.broadcast({"type": "moment_comment_deleted", "data": {
+        "moment_id": moment_id, "comment_id": comment_id,
+    }})
+    return {"ok": True}
 
 
 @router.get("/unread")

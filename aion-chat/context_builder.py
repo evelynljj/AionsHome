@@ -21,7 +21,10 @@ from memory import (
 # ── 工具指令正则（供调用方做后处理用，集中定义） ──
 MUSIC_CMD_PATTERN = re.compile(r'\[MUSIC:([^\]]+)\]')
 MOMENT_CMD_PATTERN = re.compile(r'\[MOMENT:(.+?)(?:\|(true|false))?\]')
-MEMORY_CMD_PATTERN = re.compile(r'\[MEMORY:([^\]]+)\]')
+MEMORY_CMD_PATTERN = re.compile(
+    r'\[\s*M[\u200b\u200c\u200d\ufeff]*E[\u200b\u200c\u200d\ufeff]*M[\u200b\u200c\u200d\ufeff]*O[\u200b\u200c\u200d\ufeff]*R[\u200b\u200c\u200d\ufeff]*Y\s*[：:]\s*([^\]]+)\]',
+    re.IGNORECASE,
+)
 ACTIVITY_CHECK_PATTERN = re.compile(r'\[查看动态:(\d+)\]')
 SELFIE_CMD_PATTERN = re.compile(r'\[SELFIE:\s*([^\]]+)\]')
 DRAW_CMD_PATTERN = re.compile(r'\[DRAW:\s*([^\]]+)\]')
@@ -50,6 +53,23 @@ HOME_ABILITY_TEXT = (
     "[HOME:on/off/state|别名] 或 [HOME:climate|别名|mode=cool|temperature=26] "
     f"控制智能家居，仅限明确要求。别名：{HOME_ALIASES_HINT}。"
 )
+
+
+def format_ability_block(abilities: list[str]) -> str:
+    block = (
+        "[系统能力]\n"
+        "以下方括号指令是 AionsHome 本地动作协议，不是普通文本装饰。"
+        "当你决定使用某项能力时，请在回复中原样输出对应指令，系统会自动拦截并执行，"
+        "最终展示给用户时会隐藏这些指令。\n"
+        "使用需要先取得结果的能力（如[CAM_CHECK]、[查看动态:n]、[POI_SEARCH:类型名]）时，"
+        "先输出指令，不要编造结果；系统会把结果作为下一条消息交给你，你再根据结果自然回应。\n"
+        "如果用户明确要求设置提醒、查看状态、控制设备、点歌、生图、记录记忆等动作，不要只口头答应，"
+        "应同时使用准确指令。没有真实需要时也不要为了展示能力而滥用。\n\n"
+        "【可用指令】\n"
+    )
+    block += "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
+    block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
+    return block
 
 
 def strip_tool_commands(text: str) -> str:
@@ -93,6 +113,72 @@ def _timeline_display_names() -> tuple[str, str, str]:
     except Exception:
         pass
     return user_name, ai_name, connor_name
+
+
+async def build_health_summary() -> str:
+    """当健康数据分享开关打开时，构建一行简短的身体数据摘要。"""
+    if not SETTINGS.get("health_share_enabled"):
+        return ""
+    try:
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM health_ring_latest WHERE id=1")
+            ring = await cur.fetchone()
+            cur = await db.execute(
+                "SELECT weight_kg FROM health_weight_entries ORDER BY date DESC LIMIT 1"
+            )
+            weight_row = await cur.fetchone()
+            cur = await db.execute(
+                "SELECT start_date, end_date FROM health_period_entries ORDER BY start_date DESC LIMIT 1"
+            )
+            period_row = await cur.fetchone()
+
+        parts = []
+        if ring:
+            hr = ring["heart_rate"]
+            sys_bp = ring["systolic_bp"]
+            dia_bp = ring["diastolic_bp"]
+            spo2 = ring["spo2"]
+            hrv = ring["hrv"]
+            if hr: parts.append(f"心率:{hr}")
+            if sys_bp and dia_bp: parts.append(f"血压:{sys_bp}/{dia_bp}")
+            if spo2: parts.append(f"血氧:{spo2}")
+            if hrv: parts.append(f"HRV:{hrv}")
+            # 睡眠
+            deep = ring["sleep_deep_min"]
+            light = ring["sleep_light_min"]
+            rem = ring["sleep_rem_min"]
+            awake_c = ring["sleep_wake_count"]
+            awake_m = ring["sleep_wake_min"]
+            if deep or light or rem:
+                sleep_parts = []
+                if deep: sleep_parts.append(f"深睡{deep}m")
+                if light: sleep_parts.append(f"浅睡{light}m")
+                if rem: sleep_parts.append(f"REM{rem}m")
+                if awake_c: sleep_parts.append(f"清醒{awake_c}次{awake_m or 0}m")
+                parts.append(f"睡眠:{'/'.join(sleep_parts)}")
+
+        if weight_row:
+            parts.append(f"体重:{weight_row['weight_kg']}kg")
+
+        if period_row:
+            start = period_row["start_date"]
+            end = period_row["end_date"]
+            if end:
+                from datetime import date as _date
+                try:
+                    days = (_date.fromisoformat(end) - _date.fromisoformat(start)).days + 1
+                    parts.append(f"上次例假:{start} 持续{days}天")
+                except Exception:
+                    parts.append(f"上次例假:{start}")
+            else:
+                parts.append(f"上次例假:{start}")
+
+        if not parts:
+            return ""
+        return f"\n\n[用户健康数据] {' '.join(parts)}"
+    except Exception:
+        return ""
 
 
 async def build_ability_block(
@@ -212,9 +298,7 @@ async def build_ability_block(
     except Exception:
         pass
 
-    block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n"
-    block += "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
-    block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
+    block = format_ability_block(abilities)
 
     schedules = await get_active_schedules()
     schedule_text = build_schedule_prompt(schedules)
@@ -264,6 +348,10 @@ async def build_memory_blocks(
     """
     now_str = datetime.now().strftime("%Y年%m月%d日  %H:%M:%S")
     time_block = f"系统当前的准确时间是 {now_str}"
+    # 健康数据摘要
+    health_text = await build_health_summary()
+    if health_text:
+        time_block += health_text
     memory_block = ""
 
     if skip_digest:
@@ -494,10 +582,10 @@ def render_merged_timeline(
     """
     将合并时间线转换为 AI 上下文 history 格式。
 
-    - who: "aion" — Aion 视角(assistant=aion)；"connor" — Connor 视角(assistant=connor)
-    - 当存在混合来源时，仅在场景切换的那条消息内容前加一行内联标记，
-      不再插入伪造的 user+assistant 应答对（避免制造 agent multi-turn 假象，
-      Gemini 3 看到那种结构会切到 thinking 模式输出大段内心戏）。
+    - who: "aion" — Aion 视角；"connor" — Connor 视角。
+    - 历史消息统一渲染为 user 角色里的“历史消息 - 说话人：内容”，不再把历史里的
+      Aion/Connor 渲染成 assistant。这样可以避免模型把群聊记录误当成需要续写的多人剧本。
+    - 当存在混合来源时，仅在场景切换的那条消息内容前加一行内联标记。
     - 每条消息末尾仍带 <meta>发送时间：年月日 时分秒 [群聊/私聊]</meta>，模型仍能识别每条消息的时间和来源。
     - 系统消息按关键词过滤
 
@@ -506,11 +594,19 @@ def render_merged_timeline(
     if not merged:
         return []
 
-    _, ai_name, connor_name = _timeline_display_names()
+    user_name, ai_name, connor_name = _timeline_display_names()
     sources = set(m["source"] for m in merged)
     has_mixed = len(sources) > 1
 
-    history: list[dict] = []
+    history: list[dict] = [{
+        "role": "user",
+        "content": (
+            "[历史记录说明]\n"
+            "以下消息按时间线排列，格式为“历史消息 - 说话人：内容”或“当前用户消息 - 说话人：内容”。"
+            "这是上下文记录，不是你的回复格式；你回复时只用自己的口吻直接说话，"
+            "不要输出说话人标签，也不要替其他人续写。"
+        ),
+    }]
     current_source = None
     pending_scene_marker = ""   # 待并入下一条消息内容的场景切换提示
 
@@ -534,45 +630,22 @@ def render_merged_timeline(
                 pending_scene_marker = f"（以下切换到{label}场景）\n"
             current_source = source
 
-        # ── 角色映射 ──
-        if source == "private" and who == "aion":
-            # messages 表: sender = "user"/"assistant"/"system"
-            if sender == "system":
-                if not any(kw in content for kw in SYSTEM_MSG_CONTEXT_KEYWORDS):
-                    continue
-                role = "user"
-                content = f"[系统事件] {content}"
-            else:
-                role = sender  # "user" or "assistant"
-
-        elif source == "private" and who == "connor":
-            # chatroom_messages 表: sender = "user"/"connor"/"system"
-            if sender == "system":
-                if not any(kw in content for kw in SYSTEM_MSG_CONTEXT_KEYWORDS):
-                    continue
-                role = "user"
-                content = f"[系统事件] {content}"
-            elif sender == "connor":
-                role = "assistant"
-            else:
-                role = "user"
-
+        # ── 说话人映射：所有历史记录都作为 user 侧 transcript 提供，避免多 assistant 污染输出格式 ──
+        if sender == "system":
+            if not any(kw in content for kw in SYSTEM_MSG_CONTEXT_KEYWORDS):
+                continue
+            speaker = "系统事件"
+        elif sender == "user":
+            speaker = user_name
+        elif sender in ("assistant", "aion"):
+            speaker = ai_name
+        elif sender == "connor":
+            speaker = connor_name
         else:
-            # 群聊消息
-            if sender == who:  # "aion" or "connor" → 自己是 assistant
-                role = "assistant"
-            elif sender == "system":
-                if not any(kw in content for kw in SYSTEM_MSG_CONTEXT_KEYWORDS):
-                    continue
-                role = "user"
-                content = f"[系统事件] {content}"
-            elif sender == "user":
-                role = "user"
-            else:
-                # 对方 AI
-                other_name = connor_name if who == "aion" else ai_name
-                content = f"[{other_name}]: {content}"
-                role = "user"
+            speaker = sender or "未知说话人"
+        label = "当前用户消息" if idx == last_user_idx and sender == "user" else "历史消息"
+        content = f"{label} - {speaker}：{content}"
+        role = "user"
 
         # ── 清洗旧 meta 标签 + 添加精确时间戳 ──
         if has_mixed:

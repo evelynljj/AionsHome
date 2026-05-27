@@ -47,9 +47,12 @@ from routes import wallpaper as wallpaper_routes
 from routes import playground as playground_routes
 from routes import chatroom as chatroom_routes
 from routes import doudizhu as doudizhu_routes
+from routes import seeky as seeky_routes
 from routes import wallet as wallet_routes
 from routes import connor_wallet as connor_wallet_routes
-from activity import pc_tracker
+from routes import health as health_routes
+from routes import phone_screen as phone_screen_routes
+from activity import pc_tracker, pc_display_tracker
 from memory import auto_digest
 from chatroom import _connor_1v1_auto_digest_loop
 from fund import fund_scheduler
@@ -57,12 +60,12 @@ from fund import fund_scheduler
 
 # ── 自动记忆总结定时任务 ──────────────────────────
 async def _auto_digest_loop():
-    """每 30 分钟检查一次，若用户已 30 分钟未发消息（私聊+群聊）则自动总结"""
+    """每 30 分钟检查一次，若用户已 30 分钟未发消息（Aion 私聊+群聊）则自动总结"""
     import aiosqlite, time as _time
     while True:
         await asyncio.sleep(30 * 60)  # 30 分钟
         try:
-            # 检查最后一条用户消息的时间（私聊 + 群聊取最新的）
+            # 检查最后一条用户消息的时间（Aion 私聊 + 群聊取最新的）
             latest_ts = 0
             async with get_db() as db:
                 db.row_factory = aiosqlite.Row
@@ -73,7 +76,10 @@ async def _auto_digest_loop():
                 if row:
                     latest_ts = max(latest_ts, row["created_at"])
                 cur = await db.execute(
-                    "SELECT created_at FROM chatroom_messages WHERE sender='user' ORDER BY created_at DESC LIMIT 1"
+                    "SELECT m.created_at FROM chatroom_messages m "
+                    "JOIN chatroom_rooms r ON r.id = m.room_id "
+                    "WHERE m.sender='user' AND r.type='group' "
+                    "ORDER BY m.created_at DESC LIMIT 1"
                 )
                 row = await cur.fetchone()
                 if row:
@@ -117,6 +123,10 @@ async def lifespan(app: FastAPI):
         pc_tracker.start()
     except Exception as e:
         print(f"[PCActivity] ❌ 启动异常: {e}")
+    try:
+        pc_display_tracker.start()
+    except Exception as e:
+        print(f"[PCDisplay] ❌ 启动异常: {e}")
     # 基金监控定时任务
     fund_scheduler.set_event_loop(loop)
     fund_scheduler.start()
@@ -127,6 +137,7 @@ async def lifespan(app: FastAPI):
     cr_digest_task.cancel()
     digest_task.cancel()
     fund_scheduler.stop()
+    pc_display_tracker.stop()
     pc_tracker.stop()
     schedule_mgr.stop()
     voice.stop()
@@ -187,8 +198,11 @@ app.include_router(wallpaper_routes.router)
 app.include_router(playground_routes.router)
 app.include_router(chatroom_routes.router)
 app.include_router(doudizhu_routes.router)
+app.include_router(seeky_routes.router)
 app.include_router(wallet_routes.router)
 app.include_router(connor_wallet_routes.router)
+app.include_router(health_routes.router)
+app.include_router(phone_screen_routes.router)
 
 
 # 页面
@@ -279,6 +293,14 @@ async def chatroom_page():
 @app.get("/doudizhu")
 async def doudizhu_page():
     return FileResponse(BASE_DIR / "static" / "doudizhu.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/seeky")
+async def seeky_page():
+    return FileResponse(BASE_DIR / "static" / "seeky.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/health")
+async def health_page():
+    return FileResponse(BASE_DIR / "static" / "health.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/pet")
 async def pet_page():

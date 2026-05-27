@@ -45,7 +45,7 @@
 │   │   ├── CameraBridge.java     # 原生摄像头桥：legacy Camera API → NV21 字节旋转 → JPEG → JS 轮询（绕过 WebView HTTPS 限制），录制时转发帧给 VideoBridge
 │   │   ├── VideoBridge.java      # 原生视频录制桥：MediaCodec(H.264) + MediaCodec(AAC) + MediaMuxer → MP4，复用 CameraBridge/AudioBridge 的帧数据
 │   │   ├── (AionImageSaver)      # 图片保存桥（WebViewActivity 内匿名类）：JS base64 → MediaStore 写入相册
-│   │   └── AionPushService.java  # 前台推送服务：独立 WebSocket 长连接 + 通知弹窗 + 断线重连 + WakeLock/WifiLock 保活 + ESP32-CAM 桥接（拉帧→上传服务器）
+│   │   └── AionPushService.java  # 前台推送服务：独立 WebSocket 长连接 + 通知弹窗 + 断线重连 + WakeLock/WifiLock 保活 + ESP32-CAM 桥接 + 手机屏幕监督（MediaProjection）
 │   └── build.gradle              # compileSdk 34, minSdk 24, Gradle 8.5 + AGP 8.2.2, OkHttp 4.12.0
 ├── LittleToy/                    # BLE 玩具逆向分析 & 独立 demo
 │   ├── toy_control_v4.html       # 独立 BLE 控制页面（可单独使用）
@@ -96,7 +96,8 @@
     │   ├── doudizhu.py           # 斗地主 API：发牌/叫地主/出牌校验/AI JSON 决策/结算/钱包联动/群聊战报
     │   └── wallpaper.py          # 动态壁纸 API：文件列表/配置读写/上传/删除
     │   └── chatroom.py           # 聊天室 API：房间 CRUD、发消息(SSE)、AI 互聊(SSE)、记忆 CRUD、配置（connor_url/connor_name/TTS音色）、Connor 状态、总结记忆、图片/音频上传（/api/chatroom/upload，支持 image + audio MIME）+ 图片路径重写 + 语音附件预处理（转写注入+音频URL保留） + TTS流式合成（Aion/Connor独立音色） + 聊天室内 [CAM_CHECK] 独立实现 + Connor 1v1 指令处理（[MUSIC:]/[MEMORY:]/[TOY:]/[ALARM:] 等）+ 密语模式能力注入
-    ├── activity.py               # 设备活动日志：JSONL 存储、自动清理（保留最近 3 小时）、PC 前台窗口采集（win32gui+psutil）、App 包名→中文名映射、10分钟窗口摘要（时长权重+carry-forward状态追溯）、AI联动开关+Prompt摘要生成
+    ├── activity.py               # 设备活动日志：JSONL 存储、自动清理（保留最近 3 小时）、PC 前台窗口采集、PC 显示器电源状态/空闲检测、App 包名→中文名映射、10分钟窗口摘要、AI联动开关+Prompt摘要生成
+    ├── phone_screen.py           # 手机屏幕监督：Android MediaProjection 截图上传缓存、最近截图读取、自动清理
     ├── music.py                  # pyncm 封装层（搜索/歌曲详情/音频URL/MUSIC_U Cookie 登录/匿名登录）
     ├── README.md                 # 本文件
     ├── 监控流程.md               # Sentinel/Core 架构设计文档
@@ -275,7 +276,9 @@
 28b. **自动桥接** — 服务器直连 ESP32 失败时，自动通知 App（AionPushService）启动桥接：App 从热点局域网拉帧→上传服务器。直连恢复时自动关闭桥接
 28c. **户外模式** — 手机开热点 + ESP32 连热点，App 前台服务桥接帧数据到家里服务器（~1fps，约 80KB/帧），AI 仍可触发 Sentinel/[CAM_CHECK]/定时监控
 28d. **零侵入** — 所有下游（Sentinel、Core、[CAM_CHECK]、定时监控、预览）通过 `get_frame_jpeg()` 取帧，无需感知帧来源。`active_source` 默认 `local`，不配置 ESP32 时行为完全不变
-28e. **主屏幕画面合成** — 所有监控截图（哨兵巡逻/[CAM_CHECK]/定时监控/前端预览）均自动合成摄像头画面（上）+ 主屏幕截图（下）的上下拼接图，屏幕截图使用 `PIL.ImageGrab.grab()` 仅抓取主显示器并缩放到与摄像头同宽（~1280px），合成图约 128KB（JPEG quality=85），AI 可同时看到用户和用户的电脑屏幕内容
+28e. **多画面监控合成** — 所有监控截图（哨兵巡逻/[CAM_CHECK]/定时监控/前端预览）默认合成摄像头画面（上）+ 电脑主屏幕截图（下）；若 Android App 已开启「手机屏幕监督」，提示音后会上传最近一帧手机屏幕，服务端将手机画面等高缩放后贴到电脑屏幕层左侧窄条，AI 可同时看到用户、电脑和手机当前状态
+28f. **PC 关屏跳过截图** — 电脑屏幕截图前会先通过 `PCDisplayTracker` 检查 Windows 显示器电源状态和物理显示器 DDC/CI 电源模式（VCP 0xD6），显示器关闭或状态未知且键鼠长时间空闲时跳过 `PIL.ImageGrab.grab()`，避免夜间关屏后把无意义桌面/常驻程序发给 AI；手机截图不受影响
+28g. **手机屏幕监督** — Android App 设置页可开启 MediaProjection 授权。收到 `monitor_alert` / `cam_check` 后，App 等待约 4.2 秒，确认屏幕亮且未锁屏后抓取一帧手机屏幕并 POST 到 `/api/phone-screen/upload`；锁屏、无授权、无可用帧时 POST `/api/phone-screen/skip` 记录原因，服务端继续使用摄像头/PC画面，不阻断监控流程
 29. **Sentinel 哨兵** — 每次巡逻截图前先广播 `monitor_alert` 播放提示音并等待 5 秒（给用户准备时间），然后截图交由轻量模型（flash-lite）分析，注入设备活动摘要（近 60 分钟 6 条）作为辅助判断依据，输出结构化 JSON（含概况摘要 summary + 唤醒原因 core_reason）
 30. **Core 唤醒** — Sentinel 判断需要时唤醒 Core（当前聊天模型），直接复用哨兵截图（不再重新截图），Core 收到哨兵摘要+唤醒原因+最近5条日志+记忆召回+哨兵截图，主动在对话中联系用户
 31. **监控日志系统** — 独立于聊天的 JSONL 日志，按日期存储，3 天自动清理
@@ -304,7 +307,7 @@
 ```
 【哨兵定时监控】
   广播 monitor_alert → 前端播放提示音 → 等待 5 秒
-  → 截图（摄像头画面 + 主屏幕画面上下拼接）
+  → 截图（摄像头画面 + 电脑屏幕；可叠加手机屏幕窄条，PC关屏时跳过电脑屏幕）
   → 获取设备活动摘要（近 60 分钟 6 条）→ Sentinel(flash-lite) 分析 → 输出 JSON:
     {
       "monitoringlog": "观察描述...",
@@ -319,7 +322,7 @@
 
 【Core 主动查看监控 [CAM_CHECK]】
   Core 回复包含 [CAM_CHECK] → 后端检测并发 SSE 事件 + WebSocket 广播 → 前端播放提示音
-  → 等待 5 秒 → POST /api/cam-check-trigger → 后端截图（摄像头画面 + 主屏幕画面上下拼接）
+  → 等待 5 秒 → POST /api/cam-check-trigger → 后端截图（摄像头画面 + 电脑屏幕；可叠加手机屏幕窄条，PC关屏时跳过电脑屏幕）
   → 带人设+上下文+图片调用 Core → 结果作为新 assistant 消息保存+广播
 ```
 
@@ -919,6 +922,8 @@
 170. **双设备活动采集** — 自动记录 PC 前台窗口和手机前台 App 的使用情况，存储为 JSONL 日志，按日期分文件，保留最近 3 小时
 171. **PC 前台窗口采集** — 后台守护线程每 60 秒通过 `win32gui.GetForegroundWindow()` 获取当前窗口标题 + `psutil.Process.name()` 获取进程名，**每分钟无条件记录**（窗口没变也写入，确保摘要时长计算准确），自动过滤 Program Manager（桌面）
 172. **Android 前台 App 上报** — `AionPushService` 中独立线程每 60 秒通过 `UsageEvents` API（主）/ `UsageStatsManager`（备）获取当前前台应用包名，POST 到 `/api/activity/report`，**每次轮询都上报**（无去重，服务端摘要层负责合并）；同时注册 `BroadcastReceiver` 监听屏幕开关事件
+172a. **PC 显示器状态检测** — `PCDisplayTracker` 监听 Windows `GUID_CONSOLE_DISPLAY_STATE`，并通过 DDC/CI VCP `0xD6` 查询物理显示器电源模式；当显示器关闭，或状态未知且键鼠空闲超过阈值时，监控合成图跳过 PC 屏幕截图，只保留摄像头和可用手机截图，避免关屏睡觉时误把桌面常驻内容当成活动
+172b. **手机屏幕截图缓存** — Android App 使用 MediaProjection 按需上传手机屏幕截图，服务端保存到 `data/phone_screens/` 并复制到 `data/uploads/`，仅保留最近 50 张；最近 15 秒内的手机截图会参与监控合成，过期或锁屏时自动跳过
 173. **App 名称解析** — 服务端维护 `KNOWN_APPS` 映射表（80+ 常见应用），将包名/进程名转为中文显示名（如 `com.xingin.xhs` → `小红书`、`chrome.exe` → `Chrome`），自动过滤系统应用（桌面、SystemUI 等）
 174. **JSONL 存储 + 自动清理** — 每条日志按日期写入 `data/activity_logs/{YYYY-MM-DD}.jsonl`，`cleanup_old_activity_logs()` **每 5 分钟最多执行一次**清理超过 3 小时的旧条目
 175. **并发安全** — `threading.Lock` 保护 JSONL 文件读写，防止 PC 后台线程和手机 API 协程并发写入导致数据丢失
@@ -946,6 +951,15 @@
     → 标题变化？→ 是 → 控制台打印 + WebSocket 广播
     → 每 5 分钟触发 cleanup_old_activity_logs()
 
+【PC 显示器状态采集（activity.py PCDisplayTracker）】
+  服务启动 → lifespan 中 pc_display_tracker.start()
+  → 注册 Windows PowerSetting 通知 GUID_CONSOLE_DISPLAY_STATE
+  → display_state=on/off/dimmed 写入内存状态
+  → 每次监控截图前 refresh_physical_state()
+    ├ DDC/CI VCP 0xD6 返回 on → 允许截取 PC 屏幕
+    ├ DDC/CI VCP 0xD6 返回 standby/suspend/off/hard off → 跳过 PC 屏幕
+    └ DDC 不可用/未知 → 回退到 Windows display_state + GetLastInputInfo 空闲时间判断
+
 【Android 前台 App 上报（AionPushService activityThread）】
   服务启动 → startActivityThread()
   → 独立线程循环（60 秒间隔）：
@@ -954,6 +968,14 @@
     └ 失败 → fallback UsageStatsManager queryUsageStats
   → BroadcastReceiver 监听 SCREEN_OFF/SCREEN_ON → 立即上报 "screen_off"/"screen_on"
   ⚠ 需要「使用情况访问权限」（Settings > Special access > Usage access）
+
+【Android 手机屏幕监督（AionPushService MediaProjection）】
+  设置页「手机屏幕监督」→ WebViewActivity 调起 MediaProjection 授权
+  → AionPushService 以前台服务类型 mediaProjection 维持投屏会话
+  → 收到 monitor_alert / cam_check → 等待约 4.2 秒
+  → PowerManager + KeyguardManager 判断屏幕亮且未锁屏
+    ├ 可截图 → ImageReader 抓一帧 → JPEG 压缩 → POST /api/phone-screen/upload
+    └ 不可截图 → POST /api/phone-screen/skip 记录 no_projection / locked / no_frame 等原因
 
 【服务端处理（routes/activity.py）】
   POST /api/activity/report
@@ -1325,7 +1347,9 @@
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/api/activity/report` | POST | 设备活动上报（`{device, app, title?, timestamp?}`），自动名称解析+过滤+JSONL存储+WS广播 |
-| `/api/activity/status` | GET | PC 采集线程状态诊断（是否运行、线程状态、上次窗口标题等） |
+| `/api/activity/status` | GET | PC 采集线程状态诊断（窗口采集线程、显示器状态、物理显示器探测、键鼠空闲时间等） |
+| `/api/phone-screen/upload` | POST | Android MediaProjection 上传手机屏幕截图（base64 JPEG），保存到 `data/phone_screens/` + `uploads/` |
+| `/api/phone-screen/skip` | POST | Android 手机屏幕截图跳过原因上报（如 `no_projection` / `locked` / `no_frame`），用于诊断 |
 | `/api/activity/dates` | GET | 返回所有有日志的日期列表 |
 | `/api/activity/logs/{date}` | GET | 返回指定日期的活动日志（自动名称解析） |
 | `/api/activity/recent` | GET | 返回最近 N 小时的活动日志（默认 8 小时，`?hours=N`） |
@@ -1396,6 +1420,8 @@
 | `music` | 音乐卡片数据广播（SSE + WS 双通道） |
 | `debug` | Debug 数据广播（SSE + WS 双通道，语音发送时也能收到） |
 | `monitor_alert` | 定时监控触发，前端播放提示音，手机端弹高优先级通知 |
+| `phone_screen_uploaded` | Android 手机屏幕截图已上传，供诊断/前端实时感知 |
+| `phone_screen_skipped` | Android 手机屏幕截图跳过，携带 skip_reason/app/locked |
 | `schedule_alarm` | 闹铃到期触发，前端弹出确认弹窗，手机端弹高优先级通知 |
 | `schedule_changed` | 日程列表变动，前端刷新面板 |
 | `toy_command` | 玩具控制指令广播（含 commands 数组，SSE + WS 双通道） |
@@ -1455,10 +1481,13 @@
 - **文件导出**：消息变动自动同步到 `chats/{conv_id}.md`，含 YAML front matter，导出跳过 cam_* 角色
 - **监控定时器**：基于时间戳比较（`_next_capture_at`），非 sleep 阻塞，间隔修改即时生效
 - **摄像头 DirectShow + 验证机制**：所有 `cv2.VideoCapture` 使用 `CAP_DSHOW` 后端（Windows MSMF 后端对 USB 摄像头不稳定）；`_verify_camera()` 最多等 8 秒读到非垃圾帧（`frame.mean() > 5` 排除绿屏/黑屏）才算成功；`_capture_loop` 运行时也检测绿屏帧，连续 100 帧无效触发重连；重连逐个尝试 index 0-4 并验证，失败后 30 秒重试
+- **监控多画面合成**：`camera.py` 的 `_combine_with_screen()` 以摄像头画面为上层，电脑屏幕为下层；电脑屏幕层会先经过 `_overlay_phone_screen()`，把 `phone_screen.get_recent_phone_screen_path(15)` 返回的手机截图等高缩放后贴到左侧窄条。若 `PCDisplayTracker.should_capture_screen()` 判定显示器关闭/长空闲，则跳过 `ImageGrab.grab()`，并在有手机截图时用 `_build_phone_only_layer()` 构建「手机窄条 + PC display off / idle」图层
+- **PC 显示器状态检测**：`PCDisplayTracker` 通过隐藏窗口注册 Windows `GUID_CONSOLE_DISPLAY_STATE` 电源通知，同时在截图前使用 DDC/CI `GetVCPFeatureAndVCPFeatureReply(0xD6)` 查询物理显示器电源模式；若物理显示器返回 standby/suspend/off/hard off 或连续不可达，则跳过 PC 屏幕截图。`GetLastInputInfo()` 作为状态未知时的空闲兜底
+- **手机屏幕监督架构**：`WebViewActivity` 注入 `window.AionPhoneScreen`，设置页调用 `requestPermission()` 拉起 MediaProjection 授权；`AionPushService` 使用 `FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION` 创建 `VirtualDisplay + ImageReader`。收到 `monitor_alert` / `cam_check` 后延迟约 4.2 秒，确认 `PowerManager.isInteractive()` 且 `KeyguardManager` 未锁屏后抓一帧，JPEG 压缩上传到 `/api/phone-screen/upload`
 - **Sentinel 日志压缩**：哨兵每次分析时输出历史概况摘要（summary），避免 Core 唤醒时全量日志导致 token 过高
 - **TTS 流式推送架构**：`tts.py` 的 `TTSStreamer` 在 AI 流式输出过程中实时接收文本（`feed()`），按标点（句号/问号/感叹号/换行等）切分为 100-200 字的片段（`_try_split()` + `_find_cut_position()`），每段 `asyncio.create_task` 异步调用硅基流动 CosyVoice2-0.5B 合成 mp3（`_synthesize()`），合成完成后通过 `_dispatch()` 将音频保存到 `data/tts_cache/{msg_id}_s{seq}.mp3` 并 WebSocket 广播 `tts_chunk` 事件；`flush()` 在 AI 输出结束后处理剩余文本并等待所有合成任务完成，最后广播 `tts_done` 事件
 - **TTS 多端状态同步**：前端开启 TTS 后通过 WebSocket 发送 `tts_state` 消息，`ConnectionManager.tts_clients` 字典跟踪各连接的 TTS 状态；HTTP POST（send_message/regenerate）body 中的 `tts_enabled`/`tts_voice` 通过 `set_tts_fallback()` 存入 `_tts_fallback` 作为回落，确保 cam_check/闹铃/定时监控等服务端发起的消息也能正确获取 TTS 状态（`any_tts_enabled()` + `get_tts_voice()` 同时检查两处）
-- **PC 活动采集**：`PCActivityTracker` 守护线程通过 `win32gui.GetForegroundWindow()` + `psutil.Process.name()` 每 15 秒检测前台窗口变化，通过 `asyncio.run_coroutine_threadsafe()` 桥接主事件循环上报；`pywin32` 和 `psutil` 必须安装在项目 `.venv` 中（系统 Python 中的无效）
+- **PC 活动采集**：`PCActivityTracker` 守护线程通过 `win32gui.GetForegroundWindow()` + `psutil.Process.name()` 每 60 秒记录前台窗口，通过 `asyncio.run_coroutine_threadsafe()` 桥接主事件循环上报；`PCDisplayTracker` 另起守护线程监听显示器状态。`pywin32` 和 `psutil` 必须安装在项目 `.venv` 中（系统 Python 中的无效）
 - **App 名称解析**：服务端 `KNOWN_APPS` 字典映射 80+ 常见包名/进程名→中文名，`resolve_app_name()` 返回 `None` 表示需过滤的系统应用（桌面、SystemUI 等），读取历史日志时 `_resolve_entries()` 对旧条目重新解析确保名称一致
 - **活动日志清理**：`cleanup_old_activity_logs()` 读取→过滤→重写 JSONL 文件，仅保留 `KEEP_HOURS=8` 小时内的条目，每次上报时顺带执行
 - **TTS 前端播放流程**：前端 `ttsQueue`（Map，key=msg_id）维护各消息的播放队列，`playNextTTSChunk()` 按 seq 顺序取出分片 URL 播放；收到 `tts_done` WebSocket 事件后标记 `q.finished = true`，当最后一片播放完毕且队列标记结束时，调用 `finishTTSForMsg()` 清理并通知语音模块（`notifyVoiceAiSpeaking(false)`）恢复录音
@@ -1489,7 +1518,7 @@
 - **Android 定位线程**：`AionPushService` 中 `startLocationThread()` 启动独立 Java Thread（非 HandlerThread），`Thread.sleep(10min)` 循环，每次先 GET `/api/location/config` 检查 `active` 字段，`active = enabled && !is_location_quiet_hours()`，false 时完全跳过 GPS 采集
 - **定位 UI**：chat.html 设置面板中「📍 定位追踪」为可折叠区块（默认收起），监控日志弹窗底部增加「📍 缓存定位」调试行（显示坐标/状态/地址/精度/更新时间）
 - **POI 搜索指示器**：前端 `poiSearchMsgId` + `poiSearchCategories` 全局变量跟踪，`handlePoiSearch()` 创建蓝色弹跳动画指示器（样式同 cam-check 绿色），45 秒安全超时自动消失，新 assistant 消息到达时自动移除
-- **前台服务类型扩展**：`AndroidManifest.xml` 中 `foregroundServiceType="dataSync|location"`，`startForeground()` 传入 `FOREGROUND_SERVICE_TYPE_DATA_SYNC | FOREGROUND_SERVICE_TYPE_LOCATION`，同时声明 `ACCESS_FINE_LOCATION` + `ACCESS_COARSE_LOCATION` + `ACCESS_BACKGROUND_LOCATION` 权限
+- **前台服务类型扩展**：`AndroidManifest.xml` 中 `foregroundServiceType="dataSync|location|mediaProjection"`，`startForeground()` 按运行状态传入 `FOREGROUND_SERVICE_TYPE_DATA_SYNC | FOREGROUND_SERVICE_TYPE_LOCATION | FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION`，同时声明定位权限和 `FOREGROUND_SERVICE_MEDIA_PROJECTION`；MediaProjection 授权必须由前台 Activity 发起，进程重启/投屏会话停止后需要重新授权
 - **服务端广播兼容**：`ws.py` 的 `broadcast()` 使用 `try/except` 逐连接发送，单个连接异常不影响其他连接。新增 `except Exception` 兜底确保 RST/EOF 等异常也能清理死连接
 
 ## 踩坑记录 & 经验教训（Android 推送服务）

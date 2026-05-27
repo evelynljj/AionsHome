@@ -162,6 +162,20 @@ async def update_pet_setting(body: PetToggle):
     save_settings(SETTINGS)
     return {"ok": True, "pet_enabled": body.enabled}
 
+# ── 健康数据分享开关 ──────────────────────────────
+@router.get("/api/settings/health-share")
+async def get_health_share_setting():
+    return {"health_share_enabled": SETTINGS.get("health_share_enabled", False)}
+
+class HealthShareToggle(BaseModel):
+    enabled: bool
+
+@router.put("/api/settings/health-share")
+async def update_health_share_setting(body: HealthShareToggle):
+    SETTINGS["health_share_enabled"] = body.enabled
+    save_settings(SETTINGS)
+    return {"ok": True, "health_share_enabled": body.enabled}
+
 # ── 世界书 ────────────────────────────────────────
 class WorldBookUpdate(BaseModel):
     ai_persona: str = ""

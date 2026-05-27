@@ -126,7 +126,7 @@ function connectCommonWS(extraHandler) {
     }
     // 礼物通知 — 全局
     if (msg.type === "gift_pending") {
-      _showGiftPopup(msg.data);
+      if (_shouldShowCommonGiftPopup()) _showGiftPopup(msg.data);
       return;
     }
     // 页面自定义处理
@@ -188,9 +188,21 @@ if ('Notification' in window && Notification.permission === 'default') {
 /* ── 礼物弹窗系统 ── */
 let _giftQueue = [];
 let _giftShowing = false;
+let _giftKnownIds = new Set(JSON.parse(localStorage.getItem('aion_gift_known_ids') || '[]'));
+
+function _shouldShowCommonGiftPopup() {
+  return document.body?.dataset?.giftPopup === 'enabled';
+}
+
+function _rememberGiftSeen(giftId) {
+  if (!giftId) return;
+  _giftKnownIds.add(giftId);
+  localStorage.setItem('aion_gift_known_ids', JSON.stringify([..._giftKnownIds].slice(-200)));
+}
 
 // 页面加载时检查未领取的礼物
 document.addEventListener('DOMContentLoaded', async () => {
+  if (!_shouldShowCommonGiftPopup()) return;
   try {
     const res = await fetch('/api/gift/pending');
     const data = await res.json();
@@ -201,6 +213,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 function _showGiftPopup(gift) {
+  if (!gift || !gift.id || _giftKnownIds.has(gift.id) || _giftQueue.some(g => g.id === gift.id)) return;
   _giftQueue.push(gift);
   if (!_giftShowing) _presentNextGift();
 }
@@ -270,6 +283,11 @@ function _openGiftBox() {
   const wrap = document.getElementById('giftBoxWrap');
   const reveal = document.getElementById('giftReveal');
   if (!lid || !wrap || !reveal) return;
+  const gift = _giftQueue[0];
+  if (gift?.id) {
+    _rememberGiftSeen(gift.id);
+    fetch(`/api/gift/${gift.id}/receive`, { method: 'POST' }).catch(() => {});
+  }
 
   // 播放开礼物音效
   new Audio('/public/打开礼物.mp3').play().catch(() => {});
@@ -325,6 +343,7 @@ function _showGiftMessage() {
 }
 
 async function _receiveGift(giftId) {
+  _rememberGiftSeen(giftId);
   try {
     await fetch(`/api/gift/${giftId}/receive`, { method: 'POST' });
   } catch(e) {}

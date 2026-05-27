@@ -27,6 +27,7 @@ _DEFAULT_CONFIG = {
     "tts_aion_voice": "",
     "tts_connor_voice": "",
     "reply_order": "random",
+    "connor_model": "Codex",
 }
 
 
@@ -816,7 +817,7 @@ async def build_aion_group_context(
         f"你现在在一个三人群聊中，参与者：用户（{user_name}）、你（{ai_name}）、{connor_name}。\n"
         f"{connor_name} 是另一个 AI 伴侣。请自然地参与群聊对话，可以回应用户也可以和 {connor_name} 交流。\n"
         "回复时直接说话即可，不需要加前缀标记自己的身份。\n"
-        "以下对话记录按时间线排列，可能包含私聊和群聊的混合内容。"
+        "以下对话记录按时间线排列，可能包含私聊和群聊的混合内容；“历史消息 - 名字：内容”只是记录格式，不是你的回复格式。"
     )})
     history.append({"role": "assistant", "content": "明白了。"})
 
@@ -908,7 +909,7 @@ async def build_connor_group_context(
         f"你现在在一个三人群聊中，参与者：用户（{user_name}）、{ai_name}（另一个AI）、你（{connor_name}）。\n"
         f"请自然地参与群聊对话，可以回应用户也可以和 {ai_name} 交流。\n"
         "回复时直接说话即可，不需要加前缀标记。\n"
-        "以下对话记录按时间线排列，可能包含私聊和群聊的混合内容。"
+        "以下对话记录按时间线排列，可能包含私聊和群聊的混合内容；“历史消息 - 名字：内容”只是记录格式，不是你的回复格式。"
     )})
     history.append({"role": "assistant", "content": "明白了。"})
 
@@ -940,8 +941,9 @@ async def build_connor_1v1_context(
     user_name, _, _ = get_chatroom_names()
 
     # 角色设定、用户信息、能力等作为前缀消息对
-    if connor_persona:
-        messages.append({"role": "user", "content": f"[你的角色设定]\n{connor_persona}"})
+    connor_full_persona = connor_persona or _read_connor_persona()
+    if connor_full_persona:
+        messages.append({"role": "user", "content": f"[你的角色设定]\n{connor_full_persona}"})
         messages.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
 
     if wb.get("user_persona"):
@@ -990,7 +992,7 @@ async def build_connor_1v1_context(
     messages.append({"role": "user", "content": (
         "[私聊说明]\n"
         "你现在在和用户的私聊窗口中。\n"
-        "以下对话记录按时间线排列，可能包含私聊和群聊的混合内容，让你了解完整上下文。"
+        "以下对话记录按时间线排列，可能包含私聊和群聊的混合内容，让你了解完整上下文；“历史消息 - 名字：内容”只是记录格式，不是你的回复格式。"
     )})
     messages.append({"role": "assistant", "content": "明白了。"})
 

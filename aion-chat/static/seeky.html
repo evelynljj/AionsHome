@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Seeky</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/public/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#eaf4ff">
+<link rel="stylesheet" href="/static/seeky.css">
+</head>
+<body>
+  <div class="seeky-app">
+    <header class="top-bar">
+      <button class="icon-btn" id="menuBtn" title="小技能">☰</button>
+      <div class="brand">
+        <img src="/public/funIcon_0022_Seeky.png" alt="Seeky">
+        <div>
+          <div class="brand-name" id="brandName">Seeky</div>
+          <div class="brand-subtitle">Cyber Pet / Data Whale</div>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button class="icon-btn" id="historyBtn" title="聊天记录">☷</button>
+        <button class="icon-btn" id="settingsBtn" title="设置">⚙</button>
+      </div>
+    </header>
+
+    <aside class="side-drawer" id="sideDrawer">
+      <div class="drawer-head">
+        <div>
+          <div class="drawer-title">小技能</div>
+          <div class="drawer-subtitle">之后会装进 Seeky 的工具箱</div>
+        </div>
+        <button class="icon-btn small" id="closeMenuBtn" title="关闭">×</button>
+      </div>
+      <button class="drawer-item skill-btn" data-skill="记忆整理">记忆整理</button>
+      <button class="drawer-item skill-btn" data-skill="股市雷达">股市雷达</button>
+      <button class="drawer-item skill-btn" data-skill="新闻捕手">新闻捕手</button>
+      <button class="drawer-item skill-btn" data-skill="日常工具">日常工具</button>
+      <div class="drawer-divider"></div>
+      <button class="drawer-item" id="drawerSettingsBtn">Seeky 设置</button>
+      <button class="drawer-item" id="homeBtn">返回主页</button>
+    </aside>
+
+    <main class="pet-room">
+      <section class="pet-stage">
+        <div class="speech-bubble" id="speechBubble">我在这里，等你叫我。</div>
+
+        <div class="pet-orbit">
+          <div class="pet-glow"></div>
+          <img class="pet-avatar" id="petAvatar" src="/public/funIcon_0022_Seeky.png" alt="Seeky" draggable="false">
+        </div>
+
+        <div class="pet-nameplate">
+          <div class="pet-name" id="petName">Seeky</div>
+          <div class="pet-status" id="petStatus">ONLINE</div>
+        </div>
+      </section>
+
+      <form class="composer" id="composer">
+        <textarea id="messageInput" rows="1" maxlength="4000" placeholder="和 Seeky 说话..."></textarea>
+        <button class="send-btn" id="sendBtn" type="submit" title="发送">➤</button>
+      </form>
+    </main>
+
+    <aside class="history-panel" id="historyPanel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">聊天记录</div>
+          <div class="panel-subtitle" id="historyHint">Seeky 的独立长期窗口</div>
+        </div>
+        <button class="icon-btn small" id="closeHistoryBtn" title="关闭">×</button>
+      </div>
+      <div class="history-list" id="historyList"></div>
+      <button class="ghost-btn" id="clearBtn">清空记录</button>
+    </aside>
+
+    <aside class="config-panel" id="configPanel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">Seeky 设置</div>
+          <div class="panel-subtitle">名字、人设和聊天模型</div>
+        </div>
+        <button class="icon-btn small" id="closeSettingsBtn" title="关闭">×</button>
+      </div>
+
+      <label class="field">
+        <span>名字</span>
+        <input id="nameInput" type="text" maxlength="24" autocomplete="off">
+      </label>
+
+      <label class="field">
+        <span>聊天模型</span>
+        <select id="configModelSelect"></select>
+      </label>
+
+      <label class="field compact-field">
+        <span>上下文条数</span>
+        <input id="contextInput" type="number" min="5" max="120" step="1">
+      </label>
+
+      <label class="field persona-field">
+        <span>人设</span>
+        <textarea id="personaInput" spellcheck="false"></textarea>
+      </label>
+
+      <button class="save-btn" id="saveConfigBtn">保存设置</button>
+    </aside>
+
+    <aside class="review-panel" id="memoryReviewPanel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">记忆整理</div>
+          <div class="panel-subtitle">只生成草案，确认后才改主记忆库</div>
+        </div>
+        <button class="icon-btn small" id="closeMemoryReviewBtn" title="关闭">×</button>
+      </div>
+
+      <div class="review-mode-tabs">
+        <button class="review-mode-btn active" id="sourceModeBtn" type="button" data-mode="source">原文整理</button>
+        <button class="review-mode-btn" id="compressModeBtn" type="button" data-mode="compress">长期压缩</button>
+      </div>
+
+      <div class="review-mode-fields" id="sourceFields">
+        <label class="field review-date-field">
+          <span>开始日期（05:00）</span>
+          <input id="reviewStartDateInput" type="date">
+        </label>
+        <label class="field review-date-field">
+          <span>结束日期（到次日 05:00）</span>
+          <input id="reviewEndDateInput" type="date">
+        </label>
+      </div>
+
+      <div class="review-mode-fields hidden" id="compressFields">
+        <label class="field review-date-field">
+          <span>压缩开始日期</span>
+          <input id="compressStartDateInput" type="date">
+        </label>
+        <label class="field review-date-field">
+          <span>压缩结束日期</span>
+          <input id="compressEndDateInput" type="date">
+        </label>
+        <label class="field review-date-field">
+          <span>来源记忆</span>
+          <select id="compressSourceSelect">
+            <option value="seeky">Seeky 原文整理记忆</option>
+            <option value="compressed">已压缩记忆</option>
+            <option value="all">全部摘要记忆</option>
+          </select>
+        </label>
+        <label class="field review-date-field">
+          <span>压缩强度</span>
+          <select id="compressStrengthSelect">
+            <option value="normal">普通</option>
+            <option value="strict">严格</option>
+            <option value="major">只留重大事件</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="review-toolbar">
+        <button class="save-btn" id="createReviewBtn">生成整理草案</button>
+        <button class="ghost-btn" id="saveReviewBtn">保存修改</button>
+      </div>
+
+      <div class="review-status" id="reviewStatus">还没有整理草案。</div>
+      <div class="review-list" id="reviewList"></div>
+
+      <div class="review-footer">
+        <button class="ghost-btn" id="discardReviewBtn">废弃草案</button>
+        <button class="danger-btn" id="applyReviewBtn">确认应用</button>
+      </div>
+    </aside>
+
+    <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/seeky.js"></script>
+</body>
+</html>

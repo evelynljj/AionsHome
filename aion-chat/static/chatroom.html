@@ -50,6 +50,8 @@
         <button class="menu-btn" id="menuBtn">☰</button>
         <div class="room-title" id="roomTitle">聊天室</div>
         <div class="header-actions" id="headerActions">
+          <button class="reply-once-btn aion" id="replyAionBtn" onclick="triggerReplyOnce('aion')" style="display:none">AI 说</button>
+          <button class="reply-once-btn connor" id="replyConnorBtn" onclick="triggerReplyOnce('connor')" style="display:none">Connor 说</button>
           <button class="ai-chat-btn" id="aiChatBtn" onclick="triggerAiChat()" style="display:none">💬 让他们聊</button>
           <button onclick="openSettings()">⚙️</button>
         </div>
@@ -97,21 +99,33 @@
           <label>房间名称</label>
           <input id="setTitle" type="text">
         </div>
-        <div class="field" id="fieldAionPersona">
-          <label>AI 人设</label>
-          <textarea id="setAionPersona" placeholder="AI 在此房间使用的人设..."></textarea>
-        </div>
         <div class="field">
-          <label>第二位 AI 补充设定（可选）</label>
-          <textarea id="setConnorPersona" placeholder="留空则使用 persona.md 默认人设，此处可追加房间专属指令..."></textarea>
+          <label>第二位 AI 名字</label>
+          <input id="setConnorName" type="text" placeholder="第二位 AI">
         </div>
-        <div class="field">
-          <label>跨窗口上下文（条）</label>
-          <input id="setContextMin" type="number" min="5" max="120" value="30">
-        </div>
-        <div class="field" id="fieldAiRounds">
-          <label>AI 互聊回合上限</label>
-          <input id="setAiRounds" type="number" min="1" max="10" value="1">
+        <details class="settings-fold" id="settingsPersonaFold">
+          <summary>
+            <span id="settingsPersonaSummary">角色补充设定</span>
+            <span class="fold-hint">展开</span>
+          </summary>
+          <div class="field" id="fieldAionPersona">
+            <label>AI 人设</label>
+            <textarea id="setAionPersona" placeholder="AI 在此房间使用的人设..."></textarea>
+          </div>
+          <div class="field" id="fieldConnorPersona">
+            <label>第二位 AI 补充设定（可选）</label>
+            <textarea id="setConnorPersona" placeholder="留空则使用 persona.md 默认人设，此处可追加房间专属指令..."></textarea>
+          </div>
+        </details>
+        <div class="settings-inline-row">
+          <div class="field">
+            <label>跨窗口上下文（条）</label>
+            <input id="setContextMin" type="number" min="5" max="120" value="30">
+          </div>
+          <div class="field" id="fieldAiRounds">
+            <label>AI 互聊回合上限</label>
+            <input id="setAiRounds" type="number" min="1" max="10" value="1">
+          </div>
         </div>
         <div class="field" id="fieldReplyOrder">
           <label>群聊回复顺序</label>
@@ -119,13 +133,18 @@
             <option value="random">随机</option>
             <option value="aion" id="optAion">AI 优先</option>
             <option value="connor" id="optConnor">第二位 AI 优先</option>
+            <option value="manual">指定回复</option>
           </select>
         </div>
-        <div class="field">
-          <label>第二位 AI 名字</label>
-          <input id="setConnorName" type="text" placeholder="第二位 AI">
+        <div class="field" id="fieldAionModel">
+          <label>Aion 模型线路</label>
+          <select id="setAionModel"></select>
         </div>
-        <div style="margin-top:12px; border-top:1px solid var(--border); padding-top:12px;">
+        <div class="field" id="fieldConnorModel">
+          <label>Connor 模型线路</label>
+          <select id="setConnorModel"></select>
+        </div>
+        <div class="settings-section-compact">
           <div class="field tts-toggle-row">
             <span>语音合成 (TTS)</span>
             <label class="toggle-switch">
@@ -142,20 +161,7 @@
             <select id="setTtsConnorVoice"></select>
           </div>
         </div>
-        <div style="margin-top:12px; border-top:1px solid var(--border); padding-top:12px;">
-          <div class="field tts-toggle-row">
-            <span>🔮 密语模式</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="setWhisperMode" onchange="onWhisperToggleChange()">
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-          <div style="font-size:11px; color:var(--text3); margin-top:2px;">开启后 AI 可使用 [TOY:x] 指令控制已连接的 BLE 设备</div>
-        </div>
         <button class="save-btn" onclick="saveSettings()">保存</button>
-        <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:16px;">
-          <button class="save-btn" style="background:var(--text3)" onclick="triggerDigest()">📝 总结记忆</button>
-        </div>
       </div>
     </div>
   </div>

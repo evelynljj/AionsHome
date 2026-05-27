@@ -379,6 +379,344 @@ class PCActivityTracker:
         return "Unknown"
 
 
+# ── PC 显示器状态采集 ───────────────────────────────
+
+class PCDisplayTracker:
+    """后台线程：监听 Windows 显示器电源状态，并提供键鼠空闲时间兜底。"""
+
+    STATE_LABELS = {
+        0: "off",
+        1: "on",
+        2: "dimmed",
+    }
+
+    def __init__(self):
+        self._thread: threading.Thread | None = None
+        self._running = False
+        self._state = "unknown"
+        self._last_change_ts = 0.0
+        self._physical_state = "unknown"
+        self._physical_last_probe_ts = 0.0
+        self._physical_probe_supported = False
+        self._physical_unreachable_count = 0
+        self._hwnd = None
+        self._notify_handle = None
+        self._wnd_proc_ref = None
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        import os
+        if os.name != "nt":
+            print("[PCDisplay] 非 Windows 环境，显示器状态采集已禁用", flush=True)
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="PCDisplay")
+        self._thread.start()
+        print("[PCDisplay] 显示器状态采集已启动", flush=True)
+
+    def stop(self):
+        self._running = False
+        if self._hwnd:
+            try:
+                import win32gui
+                win32gui.PostMessage(self._hwnd, 0x0010, 0, 0)  # WM_CLOSE
+            except Exception:
+                pass
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def get_state(self) -> str:
+        return self._state
+
+    def get_status(self) -> dict:
+        return {
+            "state": self._state,
+            "physical_state": self._physical_state,
+            "physical_probe_supported": self._physical_probe_supported,
+            "physical_unreachable_count": self._physical_unreachable_count,
+            "physical_last_probe_ts": self._physical_last_probe_ts,
+            "last_change_ts": self._last_change_ts,
+            "idle_seconds": self.get_idle_seconds(),
+            "running": self._running,
+            "thread_alive": self._thread is not None and self._thread.is_alive(),
+        }
+
+    def should_capture_screen(self, idle_skip_seconds: int = 10 * 60, probe_physical: bool = True) -> bool:
+        """是否应该截取 PC 屏幕。显示器关闭时跳过；状态未知时用空闲时间兜底。"""
+        if probe_physical:
+            self.refresh_physical_state()
+            if self._physical_state == "off":
+                return False
+            if self._physical_state == "on":
+                return True
+        if self._state == "off":
+            return False
+        if self._state == "unknown":
+            idle = self.get_idle_seconds()
+            if idle is not None and idle >= idle_skip_seconds:
+                return False
+        return True
+
+    def refresh_physical_state(self, min_interval_seconds: int = 5) -> str:
+        """Best-effort 查询物理显示器电源模式，补手动按显示器电源键的场景。"""
+        now = time.time()
+        if now - self._physical_last_probe_ts < min_interval_seconds:
+            return self._physical_state
+        self._physical_last_probe_ts = now
+        try:
+            state = self._probe_physical_monitor_power_state()
+        except Exception as e:
+            print(f"[PCDisplay] 物理显示器探测失败: {e}", flush=True)
+            state = "unknown"
+
+        if state == "on":
+            self._physical_state = "on"
+            self._physical_probe_supported = True
+            self._physical_unreachable_count = 0
+        elif state == "off":
+            self._physical_state = "off"
+            self._physical_probe_supported = True
+            self._physical_unreachable_count = 0
+        elif state == "unreachable":
+            if self._physical_probe_supported:
+                self._physical_unreachable_count += 1
+                if self._physical_unreachable_count >= 2:
+                    self._physical_state = "off"
+            else:
+                self._physical_state = "unknown"
+        else:
+            self._physical_state = "unknown"
+        return self._physical_state
+
+    def get_idle_seconds(self) -> float | None:
+        """返回当前用户会话的键鼠空闲秒数，失败返回 None。"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class LASTINPUTINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.UINT),
+                    ("dwTime", wintypes.DWORD),
+                ]
+
+            lii = LASTINPUTINFO()
+            lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
+            if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii)):
+                return None
+            tick = ctypes.windll.kernel32.GetTickCount()
+            return max(0, (tick - lii.dwTime) / 1000.0)
+        except Exception:
+            return None
+
+    def _probe_physical_monitor_power_state(self) -> str:
+        """通过 DDC/CI VCP 0xD6 查询物理显示器电源模式。"""
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        dxva2 = ctypes.windll.dxva2
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        class PHYSICAL_MONITOR(ctypes.Structure):
+            _fields_ = [
+                ("hPhysicalMonitor", wintypes.HANDLE),
+                ("szPhysicalMonitorDescription", wintypes.WCHAR * 128),
+            ]
+
+        monitors = []
+        monitor_enum_proc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HMONITOR,
+            wintypes.HDC,
+            ctypes.POINTER(RECT),
+            wintypes.LPARAM,
+        )
+
+        def enum_proc(hmonitor, hdc, rect, data):
+            monitors.append(hmonitor)
+            return True
+
+        user32.EnumDisplayMonitors(0, 0, monitor_enum_proc(enum_proc), 0)
+        if not monitors:
+            return "unknown"
+
+        dxva2.GetNumberOfPhysicalMonitorsFromHMONITOR.argtypes = [
+            wintypes.HMONITOR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        dxva2.GetPhysicalMonitorsFromHMONITOR.argtypes = [
+            wintypes.HMONITOR,
+            wintypes.DWORD,
+            ctypes.POINTER(PHYSICAL_MONITOR),
+        ]
+        dxva2.DestroyPhysicalMonitors.argtypes = [
+            wintypes.DWORD,
+            ctypes.POINTER(PHYSICAL_MONITOR),
+        ]
+        dxva2.GetVCPFeatureAndVCPFeatureReply.argtypes = [
+            wintypes.HANDLE,
+            wintypes.BYTE,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+
+        success_count = 0
+        on_count = 0
+        off_count = 0
+
+        for hmonitor in monitors:
+            count = wintypes.DWORD()
+            if not dxva2.GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, ctypes.byref(count)) or count.value <= 0:
+                continue
+            arr = (PHYSICAL_MONITOR * count.value)()
+            if not dxva2.GetPhysicalMonitorsFromHMONITOR(hmonitor, count, arr):
+                continue
+            try:
+                for item in arr:
+                    code_type = wintypes.DWORD()
+                    current = wintypes.DWORD()
+                    maximum = wintypes.DWORD()
+                    ok = dxva2.GetVCPFeatureAndVCPFeatureReply(
+                        item.hPhysicalMonitor,
+                        0xD6,
+                        ctypes.byref(code_type),
+                        ctypes.byref(current),
+                        ctypes.byref(maximum),
+                    )
+                    if not ok:
+                        continue
+                    success_count += 1
+                    # MCCS VCP D6: 1=on, 2=standby, 3=suspend, 4=off, 5=hard off
+                    if current.value == 1:
+                        on_count += 1
+                    elif current.value in (2, 3, 4, 5):
+                        off_count += 1
+            finally:
+                try:
+                    dxva2.DestroyPhysicalMonitors(count, arr)
+                except Exception:
+                    pass
+
+        if on_count > 0:
+            return "on"
+        if success_count > 0 and off_count == success_count:
+            return "off"
+        if success_count == 0:
+            return "unreachable"
+        return "unknown"
+
+    def _loop(self):
+        try:
+            import ctypes
+            import time as _time
+            import win32con
+            import win32gui
+            from ctypes import wintypes
+        except Exception as e:
+            print(f"[PCDisplay] 初始化失败: {e}", flush=True)
+            self._running = False
+            return
+
+        WM_POWERBROADCAST = 0x0218
+        PBT_POWERSETTINGCHANGE = 0x8013
+        DEVICE_NOTIFY_WINDOW_HANDLE = 0x00000000
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        guid_console_display_state = GUID(
+            0x6FE69556,
+            0x704A,
+            0x47A0,
+            (ctypes.c_ubyte * 8)(0x8F, 0x24, 0xC2, 0x8D, 0x93, 0x6F, 0xDA, 0x47),
+        )
+
+        def wnd_proc(hwnd, msg, wparam, lparam):
+            if msg == WM_POWERBROADCAST and wparam == PBT_POWERSETTINGCHANGE and lparam:
+                try:
+                    # POWERBROADCAST_SETTING = GUID + DWORD DataLength + BYTE Data[1]
+                    data_offset = ctypes.sizeof(GUID) + ctypes.sizeof(wintypes.DWORD)
+                    value = wintypes.DWORD.from_address(int(lparam) + data_offset).value
+                    state = self.STATE_LABELS.get(value, "unknown")
+                    if state != self._state:
+                        self._state = state
+                        self._last_change_ts = time.time()
+                        print(f"[PCDisplay] display_state={state}", flush=True)
+                except Exception as e:
+                    print(f"[PCDisplay] 状态解析失败: {e}", flush=True)
+            return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+
+        try:
+            class_name = "AionPcDisplayTracker"
+            wc = win32gui.WNDCLASS()
+            wc.lpfnWndProc = wnd_proc
+            wc.lpszClassName = class_name
+            try:
+                win32gui.RegisterClass(wc)
+            except Exception:
+                pass
+            self._wnd_proc_ref = wnd_proc
+            self._hwnd = win32gui.CreateWindow(
+                class_name,
+                class_name,
+                0,
+                0, 0, 0, 0,
+                0,
+                0,
+                0,
+                None,
+            )
+            ctypes.windll.user32.RegisterPowerSettingNotification.restype = wintypes.HANDLE
+            ctypes.windll.user32.RegisterPowerSettingNotification.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(GUID),
+                wintypes.DWORD,
+            ]
+            self._notify_handle = ctypes.windll.user32.RegisterPowerSettingNotification(
+                wintypes.HANDLE(self._hwnd),
+                ctypes.byref(guid_console_display_state),
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            )
+            if not self._notify_handle:
+                print("[PCDisplay] RegisterPowerSettingNotification 失败，启用空闲时间兜底", flush=True)
+            while self._running:
+                win32gui.PumpWaitingMessages()
+                _time.sleep(0.25)
+        except Exception as e:
+            print(f"[PCDisplay] 监听线程异常: {e}", flush=True)
+        finally:
+            try:
+                if self._notify_handle:
+                    ctypes.windll.user32.UnregisterPowerSettingNotification(self._notify_handle)
+            except Exception:
+                pass
+            try:
+                if self._hwnd:
+                    win32gui.DestroyWindow(self._hwnd)
+            except Exception:
+                pass
+            self._hwnd = None
+            self._notify_handle = None
+            self._running = False
+            print("[PCDisplay] 线程退出", flush=True)
+
+
 # ── 10 分钟活动摘要 ──────────────────────────────────
 
 # App 名称美化映射（进程名 → 简称）
@@ -739,3 +1077,4 @@ def get_activity_summary_for_prompt(n: int = 6) -> str:
 
 # 全局单例
 pc_tracker = PCActivityTracker()
+pc_display_tracker = PCDisplayTracker()

@@ -630,6 +630,8 @@ class CameraMonitor:
     def _capture_screen(self) -> np.ndarray | None:
         """截取主屏幕画面，缩放到与摄像头同宽，返回 BGR numpy 数组"""
         try:
+            if not self._should_capture_pc_screen():
+                return None
             from PIL import ImageGrab
             img = ImageGrab.grab()  # 仅主屏幕
             screen_np = np.array(img)
@@ -644,15 +646,108 @@ class CameraMonitor:
         """将摄像头画面（上）和主屏幕截图（下）上下拼接"""
         screen = self._capture_screen()
         if screen is None:
+            phone_layer = self._build_phone_only_layer(cam_frame.shape[1])
+            if phone_layer is not None:
+                return np.vstack([cam_frame, phone_layer])
             return cam_frame
         cam_h, cam_w = cam_frame.shape[:2]
         # 将屏幕截图缩放到与摄像头同宽
         scr_h, scr_w = screen.shape[:2]
         new_scr_h = int(cam_w / scr_w * scr_h)
         screen_resized = cv2.resize(screen, (cam_w, new_scr_h), interpolation=cv2.INTER_AREA)
+        screen_resized = self._overlay_phone_screen(screen_resized)
         # 上下拼接
         combined = np.vstack([cam_frame, screen_resized])
         return combined
+
+    def _should_capture_pc_screen(self) -> bool:
+        """根据 Windows 显示器电源状态/空闲时间判断是否截取 PC 屏幕。"""
+        try:
+            from activity import pc_display_tracker
+            if pc_display_tracker.should_capture_screen():
+                return True
+            status = pc_display_tracker.get_status()
+            idle = status.get("idle_seconds")
+            idle_text = f"{idle:.0f}s" if isinstance(idle, (int, float)) else "unknown"
+            print(
+                "[Camera] PC 屏幕截图跳过: "
+                f"display={status.get('state')} "
+                f"physical={status.get('physical_state')} "
+                f"idle={idle_text}"
+            )
+            return False
+        except Exception as e:
+            print(f"[Camera] PC 显示状态检查失败，继续截图: {e}")
+            return True
+
+    def _overlay_phone_screen(self, screen_frame: np.ndarray) -> np.ndarray:
+        """把最近的手机屏幕截图缩到与电脑屏幕层同高，贴在左侧窄条。"""
+        try:
+            from phone_screen import get_recent_phone_screen_path
+            phone_path = get_recent_phone_screen_path(max_age_seconds=15)
+            if not phone_path:
+                return screen_frame
+            phone = cv2.imread(str(phone_path))
+            if phone is None:
+                return screen_frame
+
+            scr_h, scr_w = screen_frame.shape[:2]
+            ph_h, ph_w = phone.shape[:2]
+            if ph_h <= 0 or ph_w <= 0:
+                return screen_frame
+
+            new_w = max(1, int(scr_h / ph_h * ph_w))
+            max_w = max(1, int(scr_w * 0.38))
+            if new_w > max_w:
+                new_w = max_w
+            phone_resized = cv2.resize(phone, (new_w, scr_h), interpolation=cv2.INTER_AREA)
+
+            combined = screen_frame.copy()
+            combined[:, :new_w] = phone_resized
+            return combined
+        except Exception as e:
+            print(f"[Camera] 手机屏幕拼接失败: {e}")
+            return screen_frame
+
+    def _build_phone_only_layer(self, cam_w: int) -> np.ndarray | None:
+        """PC 屏幕跳过时，仍保留手机截图所在的下方窄层。"""
+        try:
+            from phone_screen import get_recent_phone_screen_path
+            phone_path = get_recent_phone_screen_path(max_age_seconds=15)
+            if not phone_path:
+                return None
+            phone = cv2.imread(str(phone_path))
+            if phone is None:
+                return None
+
+            ph_h, ph_w = phone.shape[:2]
+            if ph_h <= 0 or ph_w <= 0:
+                return None
+
+            layer_h = max(120, int(cam_w * 9 / 16))
+            layer = np.zeros((layer_h, cam_w, 3), dtype=np.uint8)
+            layer[:] = (18, 18, 18)
+
+            new_w = max(1, int(layer_h / ph_h * ph_w))
+            max_w = max(1, int(cam_w * 0.38))
+            if new_w > max_w:
+                new_w = max_w
+            phone_resized = cv2.resize(phone, (new_w, layer_h), interpolation=cv2.INTER_AREA)
+            layer[:, :new_w] = phone_resized
+            cv2.putText(
+                layer,
+                "PC display off / idle",
+                (new_w + 24, min(layer_h - 24, 54)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (180, 180, 180),
+                2,
+                cv2.LINE_AA,
+            )
+            return layer
+        except Exception as e:
+            print(f"[Camera] 手机单独图层构建失败: {e}")
+            return None
 
     def get_frame_jpeg(self) -> bytes | None:
         with self._lock:

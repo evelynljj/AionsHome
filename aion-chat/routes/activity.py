@@ -13,6 +13,7 @@ from activity import (
     get_available_dates, cleanup_old_activity_logs, KEEP_HOURS,
     resolve_app_name, pc_tracker, generate_activity_summary,
     is_activity_tracking_enabled, set_activity_tracking_enabled,
+    pc_display_tracker,
 )
 from ws import manager
 
@@ -77,6 +78,7 @@ async def activity_tracker_status():
         "last_title": pc_tracker._last_title,
         "has_event_loop": pc_tracker._event_loop is not None,
         "interval": pc_tracker.interval,
+        "pc_display": pc_display_tracker.get_status(),
     }
 
 def _resolve_entries(entries: list) -> list:

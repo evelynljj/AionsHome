@@ -634,7 +634,12 @@ async def _on_state_change(old_state: str, new_state: str, status: dict, cfg: di
 
 async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_desc: str):
     """通知哨兵分析位置变化，决定要不要唤醒 Core"""
-    from camera import read_logs_since, append_monitor_log, async_get_last_user_msg_time
+    from camera import (
+        read_logs_since,
+        append_monitor_log,
+        async_get_last_aion_timeline_user_msg_time,
+        async_get_recent_aion_timeline_text,
+    )
 
     wb = load_worldbook()
     user_name = wb.get("user_name", "你")
@@ -646,7 +651,7 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
         print("[Location] 哨兵模型 API Key 未配置，跳过哨兵通知")
         return
 
-    last_user_ts = await async_get_last_user_msg_time()
+    last_user_ts = await async_get_last_aion_timeline_user_msg_time()
     last_user_time_str = (
         time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_user_ts))
         if last_user_ts > 0 else "未知"
@@ -661,26 +666,15 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
         log_lines = [f"[{e.get('time', '')}] {e.get('monitoringlog', '')}" for e in recent_logs[-10:]]
         log_history = "\n".join(log_lines)
 
-    # 最近聊天记录
+    # 最近聊天记录（Aion 视角：合并私聊 + 群聊）
     recent_chat_text = ""
     try:
-        async with get_db() as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute("SELECT id FROM conversations ORDER BY updated_at DESC LIMIT 1")
-            conv = await cur.fetchone()
-            if conv:
-                cur2 = await db.execute(
-                    "SELECT role, content FROM messages WHERE conv_id=? AND role IN ('user','assistant') ORDER BY created_at DESC LIMIT 10",
-                    (conv["id"],)
-                )
-                rows = await cur2.fetchall()
-                if rows:
-                    lines = []
-                    for r in reversed(rows):
-                        name = user_name if r["role"] == "user" else ai_name
-                        text = r["content"][:200] + "..." if len(r["content"]) > 200 else r["content"]
-                        lines.append(f"{name}: {text}")
-                    recent_chat_text = "\n".join(lines)
+        recent_chat_text = await async_get_recent_aion_timeline_text(
+            limit=10,
+            user_name=user_name,
+            ai_name=ai_name,
+            connor_name=wb.get("connor_name", "Connor"),
+        )
     except Exception:
         pass
 
@@ -694,10 +688,10 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
 事件描述：{event_desc}
 {loc_info}
 
-{user_name}最后一次聊天时间：{last_user_time_str}
+{user_name}最后一次和你说话的时间（私聊+群聊取最新）：{last_user_time_str}
 {user_name}当前状态：{chat_status_text if chat_status_text else "（暂无）"}
 
-最近的聊天记录：
+最近的聊天记录（已合并私聊+群聊，按时间排列）：
 {recent_chat_text if recent_chat_text else "（暂无）"}
 
 最近的监控日志：
@@ -755,21 +749,29 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
     await manager.broadcast({"type": "monitor_log", "data": log_entry})
 
     if call_core:
-        await _call_core_location(event_desc, status, core_reason, recent_logs)
+        await _call_core_location(event_desc, status, core_reason, recent_logs, last_user_ts)
 
 
-async def _call_core_location(event_desc: str, status: dict, core_reason: str, cached_logs: list = None):
+async def _call_core_location(
+    event_desc: str,
+    status: dict,
+    core_reason: str,
+    cached_logs: list = None,
+    last_user_ts: float = None,
+):
     """唤醒 Core 通知位置变化"""
-    from camera import read_logs_since, append_monitor_log, async_get_last_user_msg_time
+    from camera import read_logs_since, append_monitor_log, async_get_last_aion_timeline_user_msg_time
     from ai_providers import stream_ai, CLI_STATUS_PREFIX
     from tts import TTSStreamer
     from memory import recall_memories
+    from context_builder import fetch_merged_timeline, render_merged_timeline
 
     wb = load_worldbook()
     user_name = wb.get("user_name", "你")
     ai_name = wb.get("ai_name", "AI")
 
-    last_user_ts = await async_get_last_user_msg_time()
+    if last_user_ts is None:
+        last_user_ts = await async_get_last_aion_timeline_user_msg_time()
     if last_user_ts > 0:
         elapsed = time.time() - last_user_ts
         hours = int(elapsed // 3600)
@@ -796,16 +798,8 @@ async def _call_core_location(event_desc: str, status: dict, core_reason: str, c
         conv_id = conv["id"]
         model_key = conv["model"] or "gemini-3-flash"
 
-        cur = await db.execute(
-            "SELECT role, content, attachments FROM messages WHERE conv_id=? AND role IN ('user','assistant') ORDER BY created_at DESC LIMIT 20",
-            (conv_id,)
-        )
-        rows = await cur.fetchall()
-        history = []
-        for r in reversed(rows):
-            d = dict(r)
-            d["attachments"] = []
-            history.append(d)
+    merged = await fetch_merged_timeline("aion", 20, conv_id=conv_id)
+    history = render_merged_timeline(merged, "aion")
 
     prefix = []
     if wb.get("ai_persona"):
@@ -821,7 +815,11 @@ async def _call_core_location(event_desc: str, status: dict, core_reason: str, c
     core_parts.append(f"\n{loc_info}")
     if recent_detail:
         core_parts.append(f"\n最近的监控记录：\n{recent_detail}")
-    core_parts.append(f"\n请自然地根据位置变化和{user_name}互动。{user_name}已经{time_ago}没有和你说话了。")
+    core_parts.append(
+        f"\n请自然地根据位置变化和{user_name}互动。"
+        f"这里的最近对话上下文已经合并了私聊和群聊；"
+        f"{user_name}最近一次在任一场景里和你说话是{time_ago}前。"
+    )
 
     core_prompt = "\n".join(core_parts)
 

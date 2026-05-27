@@ -3715,6 +3715,46 @@ function onWhisperModeChange() {
 // ── 礼物弹窗系统 ──
 let _giftQueue = [];
 let _giftShowing = false;
+const _GIFT_KNOWN_KEY = 'aion_gift_known_ids';
+let _giftKnownIds = _readGiftKnownIds();
+
+function _readGiftKnownIds() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(_GIFT_KNOWN_KEY) || '[]'));
+  } catch(e) {
+    return new Set();
+  }
+}
+
+function _isGiftKnown(giftId) {
+  if (!giftId) return true;
+  if (_giftKnownIds.has(giftId)) return true;
+  _giftKnownIds = _readGiftKnownIds();
+  return _giftKnownIds.has(giftId);
+}
+
+function _rememberGiftSeen(giftId) {
+  if (!giftId) return;
+  _giftKnownIds = _readGiftKnownIds();
+  _giftKnownIds.add(giftId);
+  localStorage.setItem(_GIFT_KNOWN_KEY, JSON.stringify([..._giftKnownIds].slice(-200)));
+}
+
+function _dropKnownGiftPopups() {
+  _giftKnownIds = _readGiftKnownIds();
+  const current = _giftQueue[0];
+  _giftQueue = _giftQueue.filter(g => g && !_giftKnownIds.has(g.id));
+  if (current && _giftKnownIds.has(current.id)) {
+    const overlay = document.getElementById('giftOverlay');
+    if (overlay) overlay.remove();
+    _giftShowing = false;
+    _presentNextGift();
+  }
+}
+
+window.addEventListener('storage', (e) => {
+  if (e.key === _GIFT_KNOWN_KEY) _dropKnownGiftPopups();
+});
 
 // 页面加载时检查未领取的礼物
 (async function checkPendingGifts() {
@@ -3728,6 +3768,7 @@ let _giftShowing = false;
 })();
 
 function _showGiftPopup(gift) {
+  if (!gift || !gift.id || _isGiftKnown(gift.id) || _giftQueue.some(g => g.id === gift.id)) return;
   _giftQueue.push(gift);
   if (!_giftShowing) _presentNextGift();
 }
@@ -3778,6 +3819,11 @@ function _openGiftBox() {
   const wrap = document.getElementById('giftBoxWrap');
   const reveal = document.getElementById('giftReveal');
   if (!lid || !wrap || !reveal) return;
+  const gift = _giftQueue[0];
+  if (gift?.id) {
+    _rememberGiftSeen(gift.id);
+    fetch(`/api/gift/${gift.id}/receive`, { method: 'POST' }).catch(() => {});
+  }
   // 播放开礼物音效
   new Audio('/public/打开礼物.mp3').play().catch(() => {});
   lid.classList.add('lid-open');
@@ -3819,6 +3865,7 @@ function _showGiftMessage() {
   }
 }
 async function _receiveGift(giftId) {
+  _rememberGiftSeen(giftId);
   try { await fetch(`/api/gift/${giftId}/receive`, {method:'POST'}); } catch(e) {}
   const scene = document.getElementById('giftScene');
   if (scene) scene.classList.add('fly-away');

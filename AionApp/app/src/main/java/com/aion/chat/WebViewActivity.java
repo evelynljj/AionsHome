@@ -1,4 +1,4 @@
-﻿package com.aion.chat;
+package com.aion.chat;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
@@ -13,6 +13,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.media.projection.MediaProjectionManager;
 import android.content.ContentValues;
 import android.provider.MediaStore;
 import android.util.Base64;
@@ -80,6 +81,26 @@ public class WebViewActivity extends AppCompatActivity {
                 fileCallback = null;
             });
 
+    private final ActivityResultLauncher<Intent> phoneScreenLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK && result.getData() != null) {
+                    Intent serviceIntent = new Intent(this, AionPushService.class);
+                    serviceIntent.putExtra("action", AionPushService.ACTION_START_PHONE_SCREEN);
+                    serviceIntent.putExtra(AionPushService.EXTRA_RESULT_CODE, result.getResultCode());
+                    serviceIntent.putExtra(AionPushService.EXTRA_RESULT_DATA, result.getData());
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(serviceIntent);
+                    } else {
+                        startService(serviceIntent);
+                    }
+                    getSharedPreferences("aion_prefs", MODE_PRIVATE)
+                            .edit().putBoolean("phone_screen_supervision", true).apply();
+                    Toast.makeText(this, "手机屏幕监督已开启", Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(this, "未开启手机屏幕监督", Toast.LENGTH_SHORT).show();
+                }
+            });
+
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -122,6 +143,37 @@ public class WebViewActivity extends AppCompatActivity {
             }
         }, "AionStatusBar");
 
+        // 手机屏幕监督桥接：用户显式授权后，后台服务可在监控提示音后抓取一帧屏幕。
+        webView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public void requestPermission() {
+                mainHandler.post(() -> {
+                    MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+                    if (mpm == null) {
+                        Toast.makeText(WebViewActivity.this, "此设备不支持屏幕捕获", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    phoneScreenLauncher.launch(mpm.createScreenCaptureIntent());
+                });
+            }
+
+            @JavascriptInterface
+            public void stop() {
+                Intent serviceIntent = new Intent(WebViewActivity.this, AionPushService.class);
+                serviceIntent.putExtra("action", AionPushService.ACTION_STOP_PHONE_SCREEN);
+                startService(serviceIntent);
+                getSharedPreferences("aion_prefs", MODE_PRIVATE)
+                        .edit().putBoolean("phone_screen_supervision", false).apply();
+                mainHandler.post(() -> Toast.makeText(WebViewActivity.this, "手机屏幕监督已关闭", Toast.LENGTH_SHORT).show());
+            }
+
+            @JavascriptInterface
+            public boolean isEnabled() {
+                return getSharedPreferences("aion_prefs", MODE_PRIVATE)
+                        .getBoolean("phone_screen_supervision", false);
+            }
+        }, "AionPhoneScreen");
+
         // 原生麦克风桥接（绕过 getUserMedia 的 HTTPS 限制）
         AudioBridge audioBridge = new AudioBridge(webView);
         webView.addJavascriptInterface(audioBridge, "AionAudio");
@@ -138,6 +190,7 @@ public class WebViewActivity extends AppCompatActivity {
 
         // 原生 BLE 桥接（绕过 WebView 不支持 Web Bluetooth API 的限制）
         webView.addJavascriptInterface(new BleBridge(webView, this), "AionBle");
+        webView.addJavascriptInterface(new AionRingBleBridge(webView, this), "AionRingBle");
 
         // 图片保存桥接（WebView 不支持 blob URL 下载，用原生方法写入相册）
         webView.addJavascriptInterface(new Object() {
@@ -340,7 +393,7 @@ public class WebViewActivity extends AppCompatActivity {
         // 加载目标 URL
         targetUrl = getIntent().getStringExtra("url");
         if (targetUrl == null || targetUrl.isEmpty()) {
-            targetUrl = "http://192.168.xx.xxx:8080/chat";
+            targetUrl = "http://192.168.1.92:8080/chat";
         }
         webView.loadUrl(targetUrl);
     }
@@ -562,23 +615,31 @@ public class WebViewActivity extends AppCompatActivity {
     @SuppressWarnings("deprecation")
     @Override
     public void onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            // 已经退到最顶层，弹出选择对话框
-            new AlertDialog.Builder(this, R.style.Theme_AionChat_Dialog)
-                .setTitle("Aion Oloth")
-                .setMessage("要切换连接地址还是退出？")
-                .setPositiveButton("切换地址", (d, w) -> {
-                    SharedPreferences prefs = getSharedPreferences("aion_prefs", MODE_PRIVATE);
-                    prefs.edit().putBoolean("auto_connect", false).apply();
-                    startActivity(new Intent(this, LauncherActivity.class));
-                    finish();
-                })
-                .setNegativeButton("退出", (d, w) -> finish())
-                .setNeutralButton("取消", null)
-                .show();
-        }
+        // 统一由 JS 判断当前页面状态，决定导航到 Home 还是弹对话框
+        webView.evaluateJavascript(
+            "(function(){ if(typeof handleNativeBack==='function') return handleNativeBack(); return 'dialog'; })()",
+            value -> runOnUiThread(() -> {
+                if ("\"dialog\"".equals(value)) {
+                    showExitDialog();
+                }
+                // "handled" = JS 已导航到 Home，无需额外操作
+            })
+        );
+    }
+
+    private void showExitDialog() {
+        new AlertDialog.Builder(this, R.style.Theme_AionChat_Dialog)
+            .setTitle("Aion Oloth")
+            .setMessage("要切换连接地址还是退出？")
+            .setPositiveButton("切换地址", (d, w) -> {
+                SharedPreferences prefs = getSharedPreferences("aion_prefs", MODE_PRIVATE);
+                prefs.edit().putBoolean("auto_connect", false).apply();
+                startActivity(new Intent(this, LauncherActivity.class));
+                finish();
+            })
+            .setNegativeButton("退出", (d, w) -> finish())
+            .setNeutralButton("取消", null)
+            .show();
     }
 
     @Override

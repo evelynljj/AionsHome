@@ -24,7 +24,10 @@ from routes.music import MUSIC_CMD_PATTERN
 from tts import TTSStreamer
 
 MOMENT_CMD_PATTERN = re.compile(r'\[MOMENT:(.+?)(?:\|(true|false))?\]')
-MEMORY_CMD_PATTERN = re.compile(r'\[MEMORY:([^\]]+)\]')
+MEMORY_CMD_PATTERN = re.compile(
+    r'\[\s*M[\u200b\u200c\u200d\ufeff]*E[\u200b\u200c\u200d\ufeff]*M[\u200b\u200c\u200d\ufeff]*O[\u200b\u200c\u200d\ufeff]*R[\u200b\u200c\u200d\ufeff]*Y\s*[：:]\s*([^\]]+)\]',
+    re.IGNORECASE,
+)
 ACTIVITY_CHECK_PATTERN = re.compile(r'\[查看动态:(\d+)\]')
 SELFIE_CMD_PATTERN = re.compile(r'\[SELFIE:\s*([^\]]+)\]')
 DRAW_CMD_PATTERN = re.compile(r'\[DRAW:\s*([^\]]+)\]')
@@ -38,7 +41,10 @@ THEATER_ITEM_PATTERN = re.compile(r'\[剧场道具[：:]([^\]]+)\]')
 
 # 允许进入上下文的 system 消息关键词（点歌、查看监控、查看动态）
 _SYSTEM_MSG_CONTEXT_KEYWORDS = ('查看了监控', '搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话')
-from context_builder import fetch_merged_timeline, render_merged_timeline
+from context_builder import (
+    fetch_merged_timeline, render_merged_timeline, build_health_summary,
+    format_ability_block,
+)
 from music import search_songs, get_audio_url
 from schedule import process_schedule_commands, get_active_schedules, build_schedule_prompt
 from mcp_client import mcp_manager
@@ -777,8 +783,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
         abilities.append(f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。你的钱包当前余额：{_wb:.2f}元。余额不足时不要转账。")
     except Exception:
         pass
-    ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
-    ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
+    ability_block = format_ability_block(abilities)
     # CLI 模型专属：告知图片存储目录，使其能保存图片并返回路径
     _provider = MODELS.get(model_key, {}).get("provider", "")
     if _provider in ("gemini_cli", "antigravity_cli", "codex_cli"):
@@ -833,6 +838,9 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
 
     now_str = datetime.now().strftime("%Y年%m月%d日  %H:%M:%S")
     bg_block = f"系统当前的准确时间是 {now_str}"
+    health_text = await build_health_summary()
+    if health_text:
+        bg_block += health_text
     if surfaced:
         unresolved_lines = [f"📌 {m['content']}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
         normal_lines = [f"- {m['content']}" for m in surfaced if not m.get("unresolved")]
@@ -1272,8 +1280,7 @@ async def send_message(conv_id: str, body: MsgCreate):
         abilities.append(f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。你的钱包当前余额：{_wb:.2f}元。余额不足时不要转账。")
     except Exception:
         pass
-    ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
-    ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
+    ability_block = format_ability_block(abilities)
     # CLI 模型专属：告知图片存储目录
     _provider = MODELS.get(model_key, {}).get("provider", "")
     if _provider in ("gemini_cli", "antigravity_cli", "codex_cli"):
@@ -1353,6 +1360,9 @@ async def send_message(conv_id: str, body: MsgCreate):
         # ── 快速模式：仅注入当前时间，跳过哨兵和记忆 ──
         now_str = datetime.now().strftime("%Y年%m月%d日  %H:%M:%S")
         bg_block = f"系统当前的准确时间是 {now_str}"
+        health_text = await build_health_summary()
+        if health_text:
+            bg_block += health_text
         history.insert(cap_idx + inject_offset, {"role": "user", "content": bg_block})
         history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到。"})
         inject_offset += 2
@@ -1383,6 +1393,9 @@ async def send_message(conv_id: str, body: MsgCreate):
         # 注入当前时间（缓存分界点）+ 背景记忆（动态内容）
         now_str = datetime.now().strftime("%Y年%m月%d日  %H:%M:%S")
         bg_block = f"系统当前的准确时间是 {now_str}"
+        health_text = await build_health_summary()
+        if health_text:
+            bg_block += health_text
         if surfaced:
             unresolved_lines = [f"📌 {m['content']}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
             normal_lines = [f"- {m['content']}" for m in surfaced if not m.get("unresolved")]
@@ -2248,8 +2261,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         abilities.append(f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。你的钱包当前余额：{_wb:.2f}元。余额不足时不要转账。")
     except Exception:
         pass
-    ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
-    ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
+    ability_block = format_ability_block(abilities)
     # CLI 模型专属：告知图片存储目录
     _provider = MODELS.get(model_key, {}).get("provider", "")
     if _provider in ("gemini_cli", "antigravity_cli", "codex_cli"):
@@ -2286,6 +2298,9 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         # ── 快速模式：仅注入当前时间 ──
         now_str = datetime.now().strftime("%Y年%m月%d日  %H:%M:%S")
         bg_block = f"系统当前的准确时间是 {now_str}"
+        health_text = await build_health_summary()
+        if health_text:
+            bg_block += health_text
         history.insert(cap_idx + inject_offset, {"role": "user", "content": bg_block})
         history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到。"})
         inject_offset += 2
@@ -2301,6 +2316,9 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         surfaced, surfaced_ids = await build_surfacing_memories(topic, recall_keywords)
         now_str = datetime.now().strftime("%Y年%m月%d日  %H:%M:%S")
         bg_block = f"系统当前的准确时间是 {now_str}"
+        health_text = await build_health_summary()
+        if health_text:
+            bg_block += health_text
         if surfaced:
             unresolved_lines = [f"📌 {m['content']}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
             normal_lines = [f"- {m['content']}" for m in surfaced if not m.get("unresolved")]
