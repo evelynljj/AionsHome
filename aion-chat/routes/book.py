@@ -17,7 +17,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from config import DATA_DIR, load_worldbook, MODELS, DEFAULT_MODEL
+from config import DATA_DIR, load_worldbook, MODELS, DEFAULT_MODEL, get_default_model
 from database import get_db
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from book import parse_epub, delete_book_files, build_annotate_text, BOOKS_DIR
@@ -409,9 +409,9 @@ async def annotate_segment(book_id: str, ch_idx: int, body: AnnotateRequest):
     wb = load_worldbook()
     ai_name = wb.get("ai_name", "AI")
     connor_name = load_chatroom_config().get("connor_name", "Connor")
-    model_key = body.model_key or DEFAULT_MODEL
+    model_key = body.model_key or get_default_model()
     if model_key not in MODELS:
-        model_key = DEFAULT_MODEL
+        model_key = get_default_model()
     if model_key not in MODELS:
         model_key = next(iter(MODELS)) if MODELS else None
     if not model_key:
@@ -496,9 +496,9 @@ async def annotate_all_segments(book_id: str, ch_idx: int, body: AnnotateAllRequ
     total = len(segments_meta)
 
     wb = load_worldbook()
-    model_key = body.model_key or DEFAULT_MODEL
+    model_key = body.model_key or get_default_model()
     if model_key not in MODELS:
-        model_key = DEFAULT_MODEL
+        model_key = get_default_model()
     if model_key not in MODELS:
         model_key = next(iter(MODELS)) if MODELS else None
     if not model_key:

@@ -10,7 +10,7 @@ from datetime import datetime
 
 import aiosqlite
 
-from config import DB_PATH, DEFAULT_MODEL, load_worldbook, SETTINGS
+from config import DB_PATH, DEFAULT_MODEL, get_default_model, load_worldbook, SETTINGS
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
@@ -291,7 +291,7 @@ class ScheduleManager:
             if not conv:
                 return
             conv_id = conv["id"]
-            model_key = conv["model"] or DEFAULT_MODEL
+            model_key = conv["model"] or get_default_model()
 
         # 聊天室来源的闹铃，优先用聊天室配置的 Aion 模型
         if is_chatroom and origin != "connor":
@@ -532,7 +532,7 @@ class ScheduleManager:
             if not conv:
                 return
             conv_id = conv["id"]
-            model_key = conv["model"] or DEFAULT_MODEL
+            model_key = conv["model"] or get_default_model()
 
         # 聊天室来源的监控，优先用聊天室配置的 Aion 模型
         if is_chatroom and origin != "connor":

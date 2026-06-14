@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from ai_providers import CLI_STATUS_PREFIX, stream_ai
 from chatroom import build_aion_group_context, build_connor_group_context, get_chatroom_names, load_chatroom_config, stream_connor_cli
-from config import DATA_DIR, DEFAULT_MODEL, SETTINGS
+from config import DATA_DIR, DEFAULT_MODEL, get_default_model, SETTINGS
 from database import get_db
 from tts import TTSStreamer
 from ws import manager
@@ -47,7 +47,7 @@ def _player_name(player: str) -> str:
 
 
 class NewGameBody(BaseModel):
-    model: str = DEFAULT_MODEL
+    model: str | None = None
 
 
 class BidBody(BaseModel):
@@ -89,7 +89,8 @@ def _load_state() -> Optional[dict]:
         return None
 
 
-def _make_game(model: str = DEFAULT_MODEL) -> dict:
+def _make_game(model: str | None = None) -> dict:
+    model = model or get_default_model()
     deck = _new_deck()
     random.shuffle(deck)
     ai_order = ["aion", "connor"]
@@ -545,7 +546,7 @@ def _append_history(state: dict, player: str, event: str, speech: str = "", card
 def _finish_bidding(state: dict):
     best = max(state["bids"], key=lambda b: b["bid"])
     if best["bid"] <= 0:
-        new_state = _make_game(state.get("model", DEFAULT_MODEL))
+        new_state = _make_game(state.get("model", get_default_model()))
         state.clear()
         state.update(new_state)
         _append_history(state, "user", "redeal", "这一轮都不叫，重新发牌；你可以先看手牌再开局。")
@@ -780,7 +781,7 @@ async def _trigger_group_replies(room_id: str):
             room_id,
             room,
             msgs,
-            DEFAULT_MODEL,
+            get_default_model(),
             queue,
             int(room.get("context_minutes", 30) or 30),
         )
@@ -881,7 +882,7 @@ async def _ask_ai(state: dict, player: str, moves: Optional[list[dict]] = None) 
         )
     messages.append({"role": "user", "content": _game_prompt(state, player, moves)})
 
-    raw = await _collect_ai_text(messages, player, state.get("model") or DEFAULT_MODEL)
+    raw = await _collect_ai_text(messages, player, state.get("model") or get_default_model())
     try:
         return _extract_json_object(raw)
     except Exception:
@@ -889,7 +890,7 @@ async def _ask_ai(state: dict, player: str, moves: Optional[list[dict]] = None) 
             {"role": "assistant", "content": raw[:1000]},
             {"role": "user", "content": "上一次输出不是合法 JSON。请立刻只返回一个符合 schema 的 JSON 对象，不要任何额外文字。"},
         ]
-        raw2 = await _collect_ai_text(retry_messages, player, state.get("model") or DEFAULT_MODEL)
+        raw2 = await _collect_ai_text(retry_messages, player, state.get("model") or get_default_model())
         return _extract_json_object(raw2)
 
 
@@ -987,7 +988,7 @@ async def get_state():
     async with _state_lock:
         state = _load_state()
         if not state:
-            state = _make_game(DEFAULT_MODEL)
+            state = _make_game(get_default_model())
             _save_state(state)
         return {"ok": True, "state": _public_state(state)}
 

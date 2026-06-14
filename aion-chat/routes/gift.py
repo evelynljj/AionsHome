@@ -41,7 +41,7 @@ async def api_test():
     """测试送礼：取最近5条记忆，强制触发完整送礼流程"""
     import aiosqlite
     from database import get_db
-    from config import load_worldbook, DEFAULT_MODEL
+    from config import load_worldbook, DEFAULT_MODEL, get_default_model
 
     # 获取最近5条记忆作为摘要
     async with get_db() as db:
@@ -64,7 +64,7 @@ async def api_test():
     if not conv_row:
         return {"ok": False, "message": "没有对话，无法测试"}
 
-    model_key = conv_row["model"] or DEFAULT_MODEL
+    model_key = conv_row["model"] or get_default_model()
     conv_id = conv_row["id"]
 
     # 获取最近聊天上下文
