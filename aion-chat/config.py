@@ -118,6 +118,58 @@ def get_embedding_config() -> dict:
         "use_openai": False,
     }
 
+# ── 聊天供应商（Kelivo 式动态供应商系统）────────────
+# 预置默认供应商：首次由设置页写入；api_key 一律留空，由用户填。
+# 改动半径原则：这里只提供数据与读写/反查函数，不自动写盘、不触碰旧 MODELS。
+DEFAULT_CHAT_PROVIDERS = [
+    {"id": "gemini", "name": "Gemini", "type": "google", "enabled": False,
+     "base_url": "https://generativelanguage.googleapis.com/v1beta", "api_path": "",
+     "api_key": "", "models": []},
+    {"id": "openai", "name": "OpenAI", "type": "openai", "enabled": False,
+     "base_url": "https://api.openai.com/v1", "api_path": "/chat/completions",
+     "api_key": "", "models": []},
+    {"id": "deepseek", "name": "DeepSeek", "type": "openai", "enabled": False,
+     "base_url": "https://api.deepseek.com/v1", "api_path": "/chat/completions",
+     "api_key": "", "models": []},
+    {"id": "openrouter", "name": "OpenRouter", "type": "openai", "enabled": False,
+     "base_url": "https://openrouter.ai/api/v1", "api_path": "/chat/completions",
+     "api_key": "", "models": []},
+    {"id": "siliconflow", "name": "硅基流动", "type": "openai", "enabled": False,
+     "base_url": "https://api.siliconflow.cn/v1", "api_path": "/chat/completions",
+     "api_key": "", "models": []},
+    {"id": "claude", "name": "Claude", "type": "anthropic", "enabled": False,
+     "base_url": "https://api.anthropic.com", "api_path": "/messages",
+     "api_key": "", "models": []},
+]
+
+def get_chat_providers() -> list:
+    """返回用户配置的聊天供应商列表。
+    老 settings 没有该字段时返回空列表，保证不报错、不破坏既有设置。"""
+    providers = SETTINGS.get("chat_providers")
+    return providers if isinstance(providers, list) else []
+
+def save_chat_providers(providers: list):
+    """合并写入：只更新内存 SETTINGS 的 chat_providers 字段后整体落盘，
+    不会清空人设/定位/各种 key 等其它设置（save_settings 落盘的是整个 SETTINGS 全局）。"""
+    SETTINGS["chat_providers"] = providers
+    save_settings(SETTINGS)
+
+def find_provider_by_model(model_key: str):
+    """根据全局标识 'provider_id/model_id' 反查所属供应商配置。
+    模型 id 自身可能含 '/'（如 anthropic/claude-3.5），故只按【首个】'/' 拆分。
+    返回 (provider_dict, model_dict)；供应商存在但模型不在已选列表时返回 (provider_dict, None)；
+    完全查不到返回 (None, None)。"""
+    if not model_key or "/" not in model_key:
+        return None, None
+    provider_id, model_id = model_key.split("/", 1)
+    for p in get_chat_providers():
+        if p.get("id") == provider_id:
+            for m in (p.get("models") or []):
+                if m.get("id") == model_id:
+                    return p, m
+            return p, None
+    return None, None
+
 # ── Worldbook ────────────────────────────────────
 def _default_worldbook() -> dict:
     return {

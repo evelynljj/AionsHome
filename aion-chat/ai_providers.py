@@ -8,7 +8,10 @@ from pathlib import Path
 import httpx
 import tempfile
 
-from config import get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, get_sentinel_config
+from config import (
+    get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, get_sentinel_config,
+    get_chat_providers, find_provider_by_model,
+)
 
 # CLI 状态前缀：yield 此前缀的 chunk 会被 _bg_generate 拦截为状态事件，不送入 TTS 和正文
 CLI_STATUS_PREFIX = "\x00CLI_STATUS:"
@@ -317,6 +320,56 @@ async def call_siliconflow(messages: list, model: str, meta: dict | None = None,
                         pass
 
 
+# ── 通用 OpenAI 兼容调用器 ────────────────────────
+async def call_openai_compatible(base_url: str, api_path: str, api_key: str, model: str,
+                                 messages: list, meta: dict | None = None,
+                                 temperature: float | None = None, max_tokens: int | None = None):
+    """通用 OpenAI 兼容流式调用器：照搬 call_siliconflow 的 SSE 逻辑，
+    唯一区别是 url / api_key 由参数传入。覆盖 OpenAI / DeepSeek / OpenRouter /
+    硅基流动 / 用户自建网关等所有 OpenAI 兼容供应商。"""
+    url = base_url.rstrip("/") + (api_path or "/chat/completions")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    api_messages = build_multimodal_messages(messages)
+    payload = {"model": model, "messages": api_messages, "stream": True,
+               "stream_options": {"include_usage": True}}
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    try:
+                        err = json.loads(body).get("error", {}).get("message", body.decode())
+                    except:
+                        err = body.decode(errors="replace")[:500]
+                    yield f"[供应商错误 {resp.status_code}] {err}"
+                    return
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: "):
+                        data = line[6:]
+                        if data.strip() == "[DONE]":
+                            return
+                        try:
+                            chunk = json.loads(data)
+                            if meta is not None and "usage" in chunk and chunk["usage"]:
+                                u = chunk["usage"]
+                                meta["prompt_tokens"] = u.get("prompt_tokens", 0)
+                                meta["completion_tokens"] = u.get("completion_tokens", 0)
+                                meta["total_tokens"] = u.get("total_tokens", 0)
+                                meta["raw"] = u  # 保留原始 usage 数据
+                            delta = chunk["choices"][0].get("delta", {}) if chunk.get("choices") else {}
+                            if "content" in delta and delta["content"]:
+                                yield delta["content"]
+                        except:
+                            pass
+    except Exception as e:
+        # 单个供应商失败不应冲断整个对话流：回传结构化错误字符串
+        yield f"[供应商错误] {str(e)[:500]}"
+
+
 # ── Gemini 安全设置（全局关闭内容过滤）─────────────
 GEMINI_SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
@@ -326,8 +379,10 @@ GEMINI_SAFETY_SETTINGS = [
 ]
 
 # ── Gemini ────────────────────────────────────────
-async def call_gemini(messages: list, model: str, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={get_key('gemini')}"
+async def call_gemini(messages: list, model: str, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None, api_key: str | None = None):
+    # 传入 api_key 则用之（动态 google 供应商的条目自带 key）；为空/未传则回退全局 get_key('gemini')。
+    key = api_key or get_key('gemini')
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={key}"
     contents = build_gemini_contents(messages)
     payload = {"contents": contents, "safetySettings": GEMINI_SAFETY_SETTINGS}
     gen_config = {}
@@ -1249,6 +1304,60 @@ async def _sentinel_describe_images(messages: list) -> list:
     return result
 
 
+# ── 动态供应商（Kelivo 式聊天模型表）──────────────
+def build_dynamic_models() -> dict:
+    """遍历 get_chat_providers() 中 enabled 的供应商，把已选模型拼成动态模型表：
+    { 'provider_id/model_id': {provider_id, type, model_id, base_url, api_path, api_key, vision, name} }
+    供 stream_ai 分发与（检查点 C 的）/api/models 选择器共用。"""
+    table: dict = {}
+    for p in get_chat_providers():
+        if not p.get("enabled"):
+            continue
+        pid = (p.get("id") or "").strip()
+        if not pid:
+            continue
+        ptype = p.get("type", "openai")
+        base_url = p.get("base_url", "")
+        api_path = p.get("api_path", "")
+        api_key = p.get("api_key", "")
+        name = p.get("name", pid)
+        for m in (p.get("models") or []):
+            mid = (m.get("id") or "").strip()
+            if not mid:
+                continue
+            table[f"{pid}/{mid}"] = {
+                "provider_id": pid, "type": ptype, "model_id": mid,
+                "base_url": base_url, "api_path": api_path, "api_key": api_key,
+                "vision": bool(m.get("vision", False)), "name": name,
+            }
+    return table
+
+
+def _resolve_dynamic_model(model_key: str):
+    """把 model_key 解析为动态供应商分发配置；非动态模型返回 None（交回旧 MODELS 回落）。
+    1) 先查 build_dynamic_models() 的已选模型表（带 vision 标记）。
+    2) 命中供应商但模型不在已选列表（老对话引用了被移除的模型）：用供应商配置兜底，vision 默认 True。
+    静态 MODELS 键均不含 '/'，永远走不到这里，旧行为完全保留。"""
+    if not model_key or "/" not in model_key:
+        return None
+    dcfg = build_dynamic_models().get(model_key)
+    if dcfg is not None:
+        return dcfg
+    provider, _model = find_provider_by_model(model_key)
+    if provider and provider.get("enabled"):
+        return {
+            "provider_id": provider.get("id", ""),
+            "type": provider.get("type", "openai"),
+            "model_id": model_key.split("/", 1)[1],
+            "base_url": provider.get("base_url", ""),
+            "api_path": provider.get("api_path", ""),
+            "api_key": provider.get("api_key", ""),
+            "vision": True,
+            "name": provider.get("name", provider.get("id", "")),
+        }
+    return None
+
+
 # ── 统一调度 ──────────────────────────────────────
 async def stream_ai(messages: list, model_key: str, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None, cancel_event=None):
     normalized = []
@@ -1259,6 +1368,35 @@ async def stream_ai(messages: list, model_key: str, meta: dict | None = None, te
         elif nm["role"] == "cam_log":
             nm["role"] = "assistant"
         normalized.append(nm)
+
+    # ── 动态供应商优先：命中则按 type 分发；未命中回落旧 MODELS（CLI / 现有调用方不受影响）──
+    dcfg = _resolve_dynamic_model(model_key)
+    if dcfg is not None:
+        # 非视觉模型 + 消息含图片 → 哨兵代看（与旧逻辑一致）
+        if not dcfg.get("vision", True) and _messages_have_images(normalized):
+            yield f"{CLI_STATUS_PREFIX}哨兵模型正在识别图片内容..."
+            normalized = await _sentinel_describe_images(normalized)
+        dtype = dcfg.get("type", "openai")
+        if dtype == "google":
+            # 复用现有 Gemini 原生实现；用条目自带 key（为空则回退 get_key('gemini')）。
+            # base_url 对 google 仍走标准 Gemini 地址（call_gemini 内部硬编码），不使用 dcfg["base_url"]。
+            gen = call_gemini(normalized, dcfg["model_id"], meta, temperature, max_tokens,
+                              api_key=(dcfg.get("api_key") or None))
+        elif dtype == "anthropic":
+            yield ("[错误] Anthropic 原生调用暂未实现（检查点 D）。"
+                   "可先通过 OpenRouter 等 OpenAI 兼容端点使用 Claude。")
+            return
+        else:  # openai 兼容
+            gen = call_openai_compatible(
+                dcfg["base_url"], dcfg["api_path"], dcfg["api_key"],
+                dcfg["model_id"], normalized, meta, temperature, max_tokens,
+            )
+        async for chunk in gen:
+            if cancel_event and cancel_event.is_set():
+                return
+            yield chunk
+        return
+
     cfg = MODELS.get(model_key)
     if not cfg:
         yield f"[错误] 未知模型: {model_key}"
