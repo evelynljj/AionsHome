@@ -10,7 +10,7 @@
 - **语音**：WebRTC VAD 语音检测 + 硬基流动 ASR (SenseVoiceSmall) + TTS (CosyVoice2) + 语音消息（按住录制）
 - **AI 接口**：硬基流动（OpenAI 兼容）、Google Gemini（REST API）、AiPro 中转站（OpenAI 兼容）、Gemini CLI（本地子进程调用，免费 OAuth 认证）、Codex CLI（本地子进程调用，Connor 专用）、Antigravity CLI（本地子进程调用，Google OAuth 认证，PowerShell Start-Transcript 捕获输出）
 - **AI 生图**：Gemini `gemini-3.1-flash-image-preview`（REST API generateContent，responseModalities=["IMAGE"]）
-- **Embedding**：Gemini `gemini-embedding-001`（3072维）或 OpenAI 兼容向量模型（如硅基流动 `Qwen/Qwen3-Embedding-8B` 4096维），余弦相似度检索，支持设置页自定义切换
+- **Embedding**：OpenAI 兼容向量模型（需在设置页配置，如硅基流动 `Qwen/Qwen3-Embedding-8B` 4096维），余弦相似度检索
 - **Android App**：Java，WebView + 前台推送服务（OkHttp 4.12.0 WebSocket）+ 原生录音桥 + 原生摄像头桥 + 原生视频录制桥（MediaCodec + MediaMuxer），compileSdk 34 / minSdk 24
 - **音乐**：pyncm（网易云音乐 API，搜索/歌曲详情/音频URL，支持 MUSIC_U Cookie VIP 登录 + 服务端代理推流）
 - **EPUB 解析**：ebooklib（EPUB 读取）+ BeautifulSoup4 / lxml（HTML 解析）
@@ -57,7 +57,7 @@
     ├── database.py               # SQLite 初始化（conversations/messages/memories/schedules/theater 等表 + 性能索引）
     ├── ws.py                     # WebSocket ConnectionManager 单例，含 tts_clients 状态追踪 + _tts_fallback HTTP 回落机制 + client_id 注册/定向推送 + 各AI最后活跃窗口追踪
     ├── ai_providers.py           # AI 调用：硅基流动/Gemini/AiPro中转站/GeminiCLI/AntigravityCLI 流式 + 非流式 + 多模态消息构建 + 哨兵模型图片描述回退（非 vision 模型自动调用哨兵识图后注入文字描述）
-    ├── memory.py                 # 向量记忆：embedding（Gemini/OpenAI兼容）、综合评分召回、手动/自动总结（合并私聊+群聊消息）、即时哨兵(RAG路由)、原文追溯、重建向量索引
+    ├── memory.py                 # 向量记忆：embedding（OpenAI 兼容，需配置）、综合评分召回、手动/自动总结（合并私聊+群聊消息）、即时哨兵(RAG路由)、原文追溯、重建向量索引
     ├── camera.py                 # 摄像头：CameraMonitor 类、Sentinel 分析（注入设备活动摘要）、Core 唤醒、[CAM_CHECK]、ESP32-CAM 双摄切换+App桥接
     ├── location.py               # 高德地图定位：GPS心跳处理、三级研判、状态机(at_home/outside)、哨兵通知、POI搜索
     ├── voice.py                  # 语音唤醒 + 半双工通话（WebRTC VAD + 硬基流动 ASR），通话中自动携带 TTS 参数
@@ -204,9 +204,9 @@
 - Kimi-K2.5 → `Pro/moonshotai/Kimi-K2.5`
 
 ### Gemini（generativelanguage.googleapis.com）
-- gemini-3.1-flash-lite → `gemini-3.1-flash-lite`（Sentinel / poll_digest 默认模型）
+- gemini-3.1-flash-lite → `gemini-3.1-flash-lite`
 - gemini-2.5-pro → `gemini-2.5-pro`
-- gemini-3-flash → `gemini-3-flash-preview`（聊天默认模型）
+- gemini-3-flash → `gemini-3-flash-preview`
 - gemini-3.1-pro → `gemini-3.1-pro-preview`
 
 ### AiPro 中转站（vip.aipro.love）
@@ -214,15 +214,15 @@
 - claude-opus-4-6 → `claude-opus-4-6`
 
 ### 哨兵/前置模型（支持自定义中转站）
-- Sentinel 哨兵分析 → 默认 `gemini-3.1-flash-lite`
-- 即时哨兵 → 默认 `gemini-3.1-flash-lite`
+- Sentinel 哨兵分析 → 哨兵模型（需在设置页配置端点，未配置则停用）
+- 即时哨兵 → 哨兵模型（需在设置页配置端点，未配置则停用）
 - 记忆总结（手动/自动） → 当前聊天对话的核心模型（跟随用户选择）
 - 聊天室记忆总结 → Codex CLI（Connor 专用）
 
-哨兵/前置模型支持在设置页配置自定义 API 地址、API Key 和模型名（OpenAI 兼容格式，如硅基流动 `Qwen/Qwen3.6-35B-A3B`），留空则走 Gemini 官方 API + Gemini Free Key。自动禁用 thinking 模式以确保快速响应。
+哨兵/前置模型需在设置页填写自有端点（API 地址 + API Key + 模型名，OpenAI 兼容格式，如硅基流动 `Qwen/Qwen3.6-35B-A3B`）；留空则该功能停用（不再回落 Gemini）。自动禁用 thinking 模式以确保快速响应。
 
 ### 向量模型（支持自定义中转站）
-- 向量 Embedding → 默认 Gemini `gemini-embedding-001`（3072维）
+- 向量 Embedding → 向量模型（需在设置页配置端点，未配置则停用；配置后在设置页指定模型）
 
 向量模型同样支持自定义配置（如硅基流动 `Qwen/Qwen3-Embedding-8B` 4096维），切换后需在记忆库页点击「🔄 重建向量索引」重新生成向量（主记忆库 + 聊天室记忆库同时重建）。
 
@@ -239,7 +239,7 @@
 8. **图片/视频上传** — 多模态支持，Gemini 用 inline_data，硅基流动用 URL
 9. **语音消息** — 微信风格按住说话录音，松手发送。浏览器使用 MediaRecorder 录制 WebM，Android 使用原生 AudioBridge 录音。录音通过硅基流动 ASR 自动转写为文字，消息以语音气泡形式展示（显示时长 + 播放按钮），转写文本同时保存供记忆/上下文使用
 9. **聊天记录文件管理** — 自动导出 .md，文件管理器弹窗查看/下载/删除
-10. **API Key 管理** — 界面内设置面板，支持 Gemini + Gemini Free（哨兵+向量）+ 硅基流动 + 中转站 四组 Key
+10. **API Key 管理** — 界面内设置面板：聊天模型供应商各自填 Key + 哨兵/向量自定义端点 + 硅基流动 + 中转站 Key
 11. **手机适配** — 侧栏抽屉式展开，聊天气泡布局，触屏友好，`@media (max-width: 768px)` 单独优化紧凑间距
 62. **聊天头像** — 用户/AI 消息旁显示圆形头像（`public/UserIcon.png` / `public/AIIcon.png`），用户右侧、AI 左侧
 63. **多气泡拆分** — AI 回复中 `\n\n` 自动拆分为多个独立消息气泡，像微信连发效果，流式输出实时拆分
@@ -255,7 +255,7 @@
 ### 向量记忆库（RAG 重构）
 17. **记忆总结（手动 + 自动）** — 手动：用户点击「总结新记忆」按钮触发（无最低条数限制）。自动：每 30 分钟检测，若用户已 30 分钟未对话且未总结消息 ≥ 30 条则自动触发。两者共用同一套逻辑和锚点，不会重复总结。从锚点之后的消息开始，每 30 条一组串行处理（余数 <10 合并到最后一组），使用当前聊天的核心模型（而非 flash-lite）提取结构化记忆（含关键词 + 重要度 0-1 + unresolved 判断），Prompt 注入世界书 AI/用户人设使记忆更具个人视角。每组成功后更新锚点。全部总结完成后，再调用一次核心模型生成私密日记并存入日记本；模型可同时决定是否发布一条朋友圈，不再把总结感慨插入聊天窗口。
 18. **即时哨兵（instant_digest）** — 每次用户发消息时自动调用 flash-lite 分析最近对话，返回结构化 JSON：`{is_search_needed, keywords, require_detail, status, topic}`，决定是否需要搜索记忆、是否需要追溯原文细节，同时提供 topic 用于背景记忆浮现
-19. **向量化存储** — 使用 Gemini `gemini-embedding-001`（3072维）将记忆向量化，存入 SQLite memories 表，每条记忆含 keywords（JSON 关键词数组）、importance（重要度）、source_start_ts/source_end_ts（来源时间范围）、unresolved（是否待办/未完成）
+19. **向量化存储** — 使用配置的向量模型（OpenAI 兼容）将记忆向量化，存入 SQLite memories 表，每条记忆含 keywords（JSON 关键词数组）、importance（重要度）、source_start_ts/source_end_ts（来源时间范围）、unresolved（是否待办/未完成）
 20. **综合评分召回** — `final_score = vec_sim × 0.6 + kw_score × 0.3 + importance × 0.1`，threshold=0.45，Top 5。关键词匹配支持子串模糊命中
 21. **原文追溯（fetch_source_details）** — 当 `require_detail=true` 时，在召回记忆的 source 时间范围内按关键词筛选原始对话记录，去重后按时间排序，拼接注入 prompt
 22. **总结锚点管理** — 锚点持久化在 `data/digest_anchor.json`，UI 显示当前锚点时间 + 日期选择器可回退
@@ -566,7 +566,7 @@
    - **刷新级（refresh）**：调用高德逆地理编码 + 天气 API 更新地址/天气。条件：移动超过阈值 或 无缓存地址
    - **完整级（full）**：刷新 + 状态变更 + 哨兵通知。条件：home/outside 状态发生切换
 131. **状态机** — 三状态：`unknown` → `at_home` ↔ `outside`，基于与家坐标的 Haversine 距离判断（≤1000m 为 at_home），状态切换触发完整级处理
-132. **哨兵通知** — 状态变更时调用哨兵模型（默认 `gemini-3.1-flash-lite`，支持自定义中转站）生成通知语，注入世界书人设 + 聊天状态 + 记忆召回 + 位置信息，作为 assistant 消息插入对话 + WebSocket 广播 + TTS
+132. **哨兵通知** — 状态变更时调用哨兵模型（需在设置页配置端点，未配置则停用）生成通知语，注入世界书人设 + 聊天状态 + 记忆召回 + 位置信息，作为 assistant 消息插入对话 + WebSocket 广播 + TTS
 133. **逆地理编码** — 高德 Web 服务 API `/v3/geocode/regeo`，将 GCJ-02 坐标转换为结构化地址（省/市/区/街道/门牌号）
 134. **实时天气** — 高德天气 API `/v3/weather/weatherInfo`，根据逆地理编码返回的 `adcode` 查询实时天气（天气现象 + 温度 + 风力）
 135. **POI 周边搜索** — 高德 POI API `/v3/place/around`，以当前坐标为圆心 1000m 半径搜索指定类型 POI（如餐饮、超市）
@@ -783,7 +783,7 @@
 185. **EPUB 导入** — 支持上传 `.epub` 格式电子书，后端使用 `ebooklib` 解析，自动提取目录、章节内容、封面与内嵌图片。书籍数据存储在 `data/books/{book_id}/` 目录下，每本书有独立的 SQLite 数据库（`book.db`）存储章节和批注
 186. **书架界面** — `/reading` 页面上半部分为书架，网格展示已导入书籍（封面+标题+作者+章节数），支持上传新书和删除
 187. **阅读器** — 点击书籍进入阅读器，显示章节标题、正文内容（含字数统计）、上/下章导航，阅读进度自动保存并恢复
-188. **双AI批注系统** — 每章支持 Aion + Connor 并行逐段批注（`asyncio.create_task` 双任务），Aion 使用配置模型（默认 `gemini-3-flash`），Connor 通过 Codex CLI 生成。批注上下文包含世界书人设、合并聊天时间线（私聊+群聊 `fetch_merged_timeline`）、前章摘要。Connor 不可用时自动跳过并 toast 提示。每个 annotator 独立存储（`book_annotations` 表 `annotator` 字段区分）
+188. **双AI批注系统** — 每章支持 Aion + Connor 并行逐段批注（`asyncio.create_task` 双任务），Aion 使用配置模型（默认跟随设置页的默认聊天模型），Connor 通过 Codex CLI 生成。批注上下文包含世界书人设、合并聊天时间线（私聊+群聊 `fetch_merged_timeline`）、前章摘要。Connor 不可用时自动跳过并 toast 提示。每个 annotator 独立存储（`book_annotations` 表 `annotator` 字段区分）
 189. **批注气泡** — 有批注的段落右侧显示双色气泡图标：Aion（暖橙）和 Connor（蓝色），点击分别弹出对应批注弹窗。段落摘要按钮也分 Aion/Connor 两个
 190. **[MUSIC:xxx] 批注点歌** — AI 批注中可使用 `[MUSIC:歌曲名 歌手名]` 指令点歌，批注弹窗中以音乐卡片形式展示，点击通过网易云 API 搜索并在页内在线播放
 191. **批注 SSE 流式生成** — 单段批注（`/api/books/{id}/chapters/{ch}/annotate`）和全章批注（`/annotate-all`）均使用 SSE 流式输出，前端逐条实时渲染批注气泡
@@ -1251,7 +1251,7 @@
 【写入】手动按钮 / 自动定时触发（共用 _do_digest）
   → 核心模型（当前聊天模型）+ 世界书人设注入，从消息提取记忆
     （summary + keywords + importance + unresolved）
-  → gemini-embedding-001 向量化（3072维）
+  → 配置的向量模型向量化
   → 存入 SQLite memories 表 + WebSocket 广播
   → 全部完成后生成私密日记，存入日记本；可选发布朋友圈
 ```
@@ -1513,7 +1513,7 @@
 - **WGS84→GCJ-02 坐标转换**：`wgs84_to_gcj02()` 实现完整的国测局加密偏移算法（含 Krasovsky 椭球参数），中国境内坐标最大偏移约 500-700 米。Android 端不做转换，统一由服务端处理
 - **三级心跳研判**：`process_heartbeat` 维护 `last_api_lng/lat` 跟踪上次 API 调用的坐标，通过 Haversine 距离判断是否显著移动（≥`movement_threshold` 500m）。轻量级处理零 API 消耗，刷新级消耗 2 次 API（逆地理+天气），完整级额外消耗 1 次 AI 调用（哨兵通知）
 - **状态机防误触**：家坐标为 (0,0) 或未设置时保持 `unknown` 状态不做研判；每次心跳先算距离再判状态，状态切换必须经过完整级处理
-- **哨兵通知**：`_notify_sentinel()` 调用哨兵模型（默认 `gemini-3.1-flash-lite`，支持自定义中转站），注入世界书人设 + `chat_status.json` 聊天状态 + 记忆召回 + 详细位置上下文（距离/地址/天气），生成自然语言通知消息
+- **哨兵通知**：`_notify_sentinel()` 调用哨兵模型（需在设置页配置端点，未配置则停用），注入世界书人设 + `chat_status.json` 聊天状态 + 记忆召回 + 详细位置上下文（距离/地址/天气），生成自然语言通知消息
 - **POI 按需搜索**：`perform_poi_check()` 模式同 `perform_cam_check()`：异步执行，使用最新缓存坐标重新逆地理编码 + POI 搜索 → 构建 system 消息 → 调用 Core 生成跟进回复 → 插入对话 + WebSocket 广播
 - **Android 定位线程**：`AionPushService` 中 `startLocationThread()` 启动独立 Java Thread（非 HandlerThread），`Thread.sleep(10min)` 循环，每次先 GET `/api/location/config` 检查 `active` 字段，`active = enabled && !is_location_quiet_hours()`，false 时完全跳过 GPS 采集
 - **定位 UI**：chat.html 设置面板中「📍 定位追踪」为可折叠区块（默认收起），监控日志弹窗底部增加「📍 缓存定位」调试行（显示坐标/状态/地址/精度/更新时间）
