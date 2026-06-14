@@ -9,7 +9,7 @@ from typing import Any
 import aiosqlite
 
 from ai_providers import CLI_STATUS_PREFIX, stream_ai
-from config import DEFAULT_MODEL, SETTINGS, load_worldbook, save_settings
+from config import DEFAULT_MODEL, get_default_model, SETTINGS, load_worldbook, save_settings
 from context_builder import fetch_merged_timeline, render_merged_timeline
 from database import get_db
 from tts import synthesize_message_tts_later
@@ -283,8 +283,8 @@ async def _latest_conversation() -> tuple[str, str] | tuple[None, str]:
         cur = await db.execute("SELECT id, model FROM conversations ORDER BY updated_at DESC LIMIT 1")
         row = await cur.fetchone()
     if row:
-        return row["id"], row["model"] or DEFAULT_MODEL
-    return None, DEFAULT_MODEL
+        return row["id"], row["model"] or get_default_model()
+    return None, get_default_model()
 
 
 async def _aion_model() -> str:
@@ -298,7 +298,7 @@ async def _aion_model() -> str:
         except Exception:
             pass
     _, model = await _latest_conversation()
-    return model or DEFAULT_MODEL
+    return model or get_default_model()
 
 
 def _connor_model() -> str:
@@ -392,7 +392,7 @@ async def _save_aion_private_message(content: str) -> dict | None:
             conv_id = f"conv_{int(now * 1000)}_idle"
             await db.execute(
                 "INSERT INTO conversations (id, title, model, created_at, updated_at) VALUES (?,?,?,?,?)",
-                (conv_id, "空闲消息", model or DEFAULT_MODEL, now, now),
+                (conv_id, "空闲消息", model or get_default_model(), now, now),
             )
         msg_id = f"msg_{int(now * 1000)}_idle"
         await db.execute(
@@ -923,7 +923,7 @@ async def _run_cam_check(actor: str) -> dict:
             conv_id, model = await _latest_conversation()
             if not conv_id:
                 raise RuntimeError("没有可用的 Aion 私聊会话")
-            await perform_cam_check(conv_id, model or DEFAULT_MODEL)
+            await perform_cam_check(conv_id, model or get_default_model())
     else:
         room_id = manager.get_connor_last_active() or await _latest_connor_room_id()
         if not room_id:

@@ -15,7 +15,7 @@ import akshare as ak
 from chinese_calendar import is_workday
 
 from config import (
-    DB_PATH, DATA_DIR, DEFAULT_MODEL, SETTINGS,
+    DB_PATH, DATA_DIR, DEFAULT_MODEL, get_default_model, SETTINGS,
     load_worldbook,
 )
 from database import get_db
@@ -328,7 +328,7 @@ async def run_fund_analysis(manual: bool = False):
         if not conv:
             return {"ok": False, "reason": "无对话"}
         conv_id = conv["id"]
-        model_key = conv["model"] or DEFAULT_MODEL
+        model_key = conv["model"] or get_default_model()
 
         cur = await db.execute(
             "SELECT role, content, attachments FROM messages WHERE conv_id=? "

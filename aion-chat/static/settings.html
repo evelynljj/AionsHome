@@ -16,14 +16,21 @@
     <h2>⚙ 设置</h2>
   </div>
   <div class="page-content">
-    <label class="form-label">Gemini API Key</label>
-    <input class="form-input" type="text" id="geminiKeyInput" placeholder="输入 Gemini API Key..." autocomplete="off" style="font-family:monospace">
-    <label class="form-label">Gemini Free Key（哨兵+向量）</label>
-    <input class="form-input" type="text" id="geminiFreeKeyInput" placeholder="留空则复用上方 Key" autocomplete="off" style="font-family:monospace">
+    <div>
+      <label class="form-label" style="font-size:15px;color:#ff8359">💬 聊天模型（供应商）</label>
+      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">每个供应商可启用/停用、填 Key、测试连通、获取模型。已启用供应商的已选模型会出现在聊天页模型下拉里（改完回聊天页刷新即可看到）。改动即时保存。</p>
+      <label class="form-label">默认聊天模型</label>
+      <p style="font-size:12px;color:#aaa;margin:2px 0 8px 0">新对话、后台记忆/人设任务在未显式选模型时使用。</p>
+      <select class="form-input" id="defaultModelSelect" onchange="cpSetDefaultModel(this.value)" style="font-family:monospace"></select>
+      <div id="chatProvidersList" style="margin-top:14px"></div>
+      <div class="btn-row" style="justify-content:flex-start;margin-top:10px">
+        <button class="btn-save" type="button" onclick="openAddProviderModal()">＋ 添加供应商</button>
+      </div>
+    </div>
 
     <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
       <label class="form-label" style="font-size:15px;color:#ff8359">🛡 前置 & 哨兵模型（自定义中转站）</label>
-      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">留空则默认走 Gemini 官方 API + 上方 Free Key</p>
+      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">需填写自有端点，留空则该功能停用</p>
       <label class="form-label">API 地址（Base URL）</label>
       <input class="form-input" type="text" id="sentinelBaseUrlInput" placeholder="例：https://api.siliconflow.cn" autocomplete="off" style="font-family:monospace">
       <label class="form-label">API Key</label>
@@ -34,7 +41,7 @@
 
     <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
       <label class="form-label" style="font-size:15px;color:#ff8359">📐 向量模型（记忆库 Embedding）</label>
-      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">留空则默认走 Gemini embedding-001。切换模型后维度可能不同，需重建向量（记忆库→手动总结）</p>
+      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">需填写自有端点，留空则该功能停用。切换模型后维度可能不同，需重建向量（记忆库→手动总结）</p>
       <label class="form-label">API 地址（Base URL）</label>
       <input class="form-input" type="text" id="embeddingBaseUrlInput" placeholder="例：https://api.siliconflow.cn" autocomplete="off" style="font-family:monospace">
       <label class="form-label">API Key</label>
@@ -92,8 +99,6 @@ connectCommonWS();
 
 (async function init() {
   const s = await api("GET", "/api/settings");
-  $("geminiKeyInput").value = s.gemini_key || "";
-  $("geminiFreeKeyInput").value = s.gemini_free_key || "";
   $("sentinelBaseUrlInput").value = s.sentinel_base_url || "";
   $("sentinelApiKeyInput").value = s.sentinel_api_key || "";
   $("sentinelModelInput").value = s.sentinel_model || "";
@@ -109,12 +114,11 @@ connectCommonWS();
   $("luckinLatitudeInput").value = s.luckin_default_latitude || "";
   $("luckinShopKeywordInput").value = s.luckin_default_shop_keyword || "";
   refreshPhoneScreenStatus();
+  loadChatProviders();
 })();
 
 async function saveSettings() {
   await api("PUT", "/api/settings", {
-    gemini_key: $("geminiKeyInput").value.trim(),
-    gemini_free_key: $("geminiFreeKeyInput").value.trim(),
     sentinel_base_url: $("sentinelBaseUrlInput").value.trim(),
     sentinel_api_key: $("sentinelApiKeyInput").value.trim(),
     sentinel_model: $("sentinelModelInput").value.trim(),
@@ -197,6 +201,333 @@ function refreshPhoneScreenStatus() {
   try { mediaProjection = !!bridge.isEnabled?.(); } catch (e) {}
   try { accessibility = !!bridge.isAccessibilityEnabled?.(); } catch (e) {}
   el.textContent = `共享屏幕：${mediaProjection ? "已开启" : "未开启"} · 无障碍：${accessibility ? "已开启" : "未开启"}`;
+}
+
+// ── 聊天模型（供应商） ──────────────────────────────
+let chatProviders = [];
+let cpExpanded = null;            // 当前展开的供应商 id
+let cpModalType = "openai";
+let cpDefaultModel = "";          // 当前默认聊天模型（provider_id/model_id；空=自动）
+const CP_PRESET = {
+  openai:    { base_url: "https://api.openai.com/v1", api_path: "/chat/completions" },
+  google:    { base_url: "https://generativelanguage.googleapis.com/v1beta", api_path: "" },
+  anthropic: { base_url: "https://api.anthropic.com", api_path: "/messages" },
+};
+const CP_TYPE_LABEL = { openai: "OpenAI 兼容", google: "Google (Gemini)", anthropic: "Claude (Anthropic)" };
+const CP_DEFAULT_NAME = { openai: "OpenAI", google: "Gemini", anthropic: "Claude" };
+
+async function loadChatProviders() {
+  try {
+    const r = await api("GET", "/api/chat_providers");
+    chatProviders = (r && Array.isArray(r.chat_providers)) ? r.chat_providers : [];
+    cpDefaultModel = (r && r.default_chat_model) ? r.default_chat_model : "";
+  } catch (e) { chatProviders = []; }
+  // 规整字段，避免缺字段渲染报错
+  chatProviders.forEach(p => {
+    p.models = Array.isArray(p.models) ? p.models : [];
+    p.enabled = !!p.enabled;
+    p.type = p.type || "openai";
+    p.base_url = p.base_url || "";
+    p.api_path = p.api_path || "";
+    p.api_key = p.api_key || "";
+    p.name = p.name || p.id || "";
+  });
+  renderChatProviders();
+}
+
+async function persistChatProviders() {
+  try { await api("PUT", "/api/chat_providers", { chat_providers: chatProviders }); }
+  catch (e) { showToast("保存失败：" + (e && e.message ? e.message : e)); }
+}
+
+function cpIdx(id) { return chatProviders.findIndex(p => p.id === id); }
+
+function renderDefaultModelSelect() {
+  const sel = $("defaultModelSelect");
+  if (!sel) return;
+  const opts = [];
+  let hasCurrent = false;
+  chatProviders.forEach(p => {
+    if (!p.enabled) return;
+    (p.models || []).forEach(m => {
+      const key = `${p.id}/${m.id}`;
+      if (key === cpDefaultModel) hasCurrent = true;
+      opts.push(`<option value="${escHtml(key)}" ${key === cpDefaultModel ? "selected" : ""}>${escHtml(p.name || p.id)} / ${escHtml(m.id)}</option>`);
+    });
+  });
+  if (!opts.length) {
+    sel.innerHTML = `<option value="">请先启用并添加供应商模型</option>`;
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  // 当前默认不在已启用列表里（被停用/历史值）→ 顶部加占位项标明
+  if (cpDefaultModel && !hasCurrent) {
+    opts.unshift(`<option value="${escHtml(cpDefaultModel)}" selected>${escHtml(cpDefaultModel)}（当前，未在已启用列表）</option>`);
+  }
+  // 没有显式默认 → 顶部“自动”项（value 空，后端回落首个已启用模型）
+  if (!cpDefaultModel) {
+    opts.unshift(`<option value="" selected>自动（用首个已启用供应商模型）</option>`);
+  }
+  sel.innerHTML = opts.join("");
+}
+
+async function cpSetDefaultModel(val) {
+  cpDefaultModel = val || "";
+  try {
+    await api("PUT", "/api/default_chat_model", { model: cpDefaultModel });
+    showToast("✅ 默认聊天模型已更新");
+  } catch (e) { showToast("保存失败"); }
+}
+
+function renderChatProviders() {
+  const box = $("chatProvidersList");
+  if (!box) return;
+  if (!chatProviders.length) {
+    box.innerHTML = `<p style="font-size:12px;color:#888">还没有供应商，点下方「添加供应商」。</p>`;
+    return;
+  }
+  box.innerHTML = chatProviders.map((p, idx) => {
+    const expanded = cpExpanded === p.id;
+    const modelsHtml = (p.models || []).map((m, mi) => `
+      <span style="display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,0.08);border-radius:12px;padding:3px 8px;margin:3px 5px 0 0;font-size:12px">
+        <span style="font-family:monospace">${escHtml(m.id)}</span>
+        <span title="是否支持图片输入（点击切换）" onclick="cpToggleVision('${p.id}',${mi})" style="cursor:pointer">${m.vision ? "👁" : "🚫"}</span>
+        <span title="移除" onclick="cpRemoveModel('${p.id}',${mi})" style="cursor:pointer;color:#ff6b6b">×</span>
+      </span>`).join("") || `<span style="font-size:12px;color:#888">未选模型</span>`;
+    const detail = !expanded ? "" : `
+      <div style="margin-top:10px">
+        <label class="form-label">API Key</label>
+        <div style="display:flex;gap:6px">
+          <input class="form-input" type="password" id="cp-key-${idx}" value="${escHtml(p.api_key)}" placeholder="${p.type==='google'?'留空则用全局 Gemini Key':'sk-...'}" autocomplete="off" style="font-family:monospace;flex:1" onchange="cpEditField('${p.id}','api_key',this.value)">
+          <button class="btn-save" type="button" onclick="cpToggleKeyVisible(${idx})" style="padding:3px 10px">👁</button>
+        </div>
+        <label class="form-label">API Base URL</label>
+        <input class="form-input" type="text" value="${escHtml(p.base_url)}" placeholder="例：https://api.openai.com/v1" autocomplete="off" style="font-family:monospace" onchange="cpEditField('${p.id}','base_url',this.value)">
+        <label class="form-label">API 路径${p.type==='google'?'（google 类型忽略）':''}</label>
+        <input class="form-input" type="text" value="${escHtml(p.api_path)}" placeholder="/chat/completions" autocomplete="off" style="font-family:monospace" onchange="cpEditField('${p.id}','api_path',this.value)">
+        <div class="btn-row" style="justify-content:flex-start;margin-top:8px;gap:8px">
+          <button class="btn-save" type="button" onclick="cpTest('${p.id}')">测试</button>
+          <span id="cp-test-result-${idx}" style="font-size:12px;color:#aaa;align-self:center"></span>
+        </div>
+        <label class="form-label" style="margin-top:8px">模型</label>
+        <div>${modelsHtml}</div>
+        <div class="btn-row" style="justify-content:flex-start;margin-top:8px;gap:6px;flex-wrap:wrap">
+          <button class="btn-save" type="button" onclick="cpFetchModels('${p.id}')">获取</button>
+          <input class="form-input" id="cp-manual-${idx}" type="text" placeholder="手动加模型 id" autocomplete="off" style="font-family:monospace;flex:1;min-width:120px">
+          <button class="btn-save" type="button" onclick="cpAddManualModel('${p.id}',${idx})">＋</button>
+        </div>
+        <div id="cp-fetch-${idx}"></div>
+      </div>`;
+    return `
+    <div style="border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:10px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <label style="display:flex;align-items:center;gap:6px;flex:1;cursor:pointer">
+          <input type="checkbox" ${p.enabled ? "checked" : ""} onchange="cpToggleEnabled('${p.id}', this.checked)" style="width:16px;height:16px">
+          <b>${escHtml(p.name || p.id)}</b>
+          <span style="font-size:11px;color:#888">${escHtml(CP_TYPE_LABEL[p.type] || p.type)}</span>
+        </label>
+        <button class="btn-save" type="button" onclick="cpToggleExpand('${p.id}')" style="padding:3px 10px">${expanded ? "收起" : "展开"}</button>
+        <button class="btn-cancel" type="button" onclick="cpDeleteProvider('${p.id}')" style="padding:3px 10px">删除</button>
+      </div>
+      ${detail}
+    </div>`;
+  }).join("");
+  renderDefaultModelSelect();
+}
+
+function cpToggleExpand(id) { cpExpanded = (cpExpanded === id) ? null : id; renderChatProviders(); }
+
+async function cpToggleEnabled(id, val) {
+  const i = cpIdx(id); if (i < 0) return;
+  chatProviders[i].enabled = !!val;
+  await persistChatProviders();
+}
+
+function cpEditField(id, field, val) {
+  const i = cpIdx(id); if (i < 0) return;
+  chatProviders[i][field] = (val || "").trim();
+  persistChatProviders();   // 失焦即存
+}
+
+function cpToggleKeyVisible(idx) {
+  const el = $("cp-key-" + idx); if (!el) return;
+  el.type = el.type === "password" ? "text" : "password";
+}
+
+async function cpToggleVision(id, mi) {
+  const i = cpIdx(id); if (i < 0) return;
+  const m = chatProviders[i].models[mi]; if (!m) return;
+  m.vision = !m.vision;
+  await persistChatProviders(); renderChatProviders();
+}
+
+async function cpRemoveModel(id, mi) {
+  const i = cpIdx(id); if (i < 0) return;
+  chatProviders[i].models.splice(mi, 1);
+  await persistChatProviders(); renderChatProviders();
+}
+
+async function cpAddManualModel(id, idx) {
+  const el = $("cp-manual-" + idx); if (!el) return;
+  const mid = el.value.trim(); if (!mid) return;
+  const i = cpIdx(id); if (i < 0) return;
+  if (!chatProviders[i].models.some(m => m.id === mid)) {
+    chatProviders[i].models.push({ id: mid, vision: false });
+    await persistChatProviders(); renderChatProviders();
+  }
+  el.value = "";
+}
+
+async function cpDeleteProvider(id) {
+  if (!confirm("确定删除该供应商？")) return;
+  const i = cpIdx(id); if (i < 0) return;
+  chatProviders.splice(i, 1);
+  if (cpExpanded === id) cpExpanded = null;
+  await persistChatProviders(); renderChatProviders();
+}
+
+async function cpTest(id) {
+  const i = cpIdx(id); if (i < 0) return;
+  const p = chatProviders[i];
+  const resultEl = $("cp-test-result-" + i);
+  const model = (p.models[0] && p.models[0].id) || "";
+  if ((p.type === "openai" || p.type === "anthropic") && !model) {
+    if (resultEl) resultEl.innerHTML = "❌ 请先获取/添加一个模型再测试";
+    return;
+  }
+  if (resultEl) resultEl.innerHTML = "⏳ 测试中…";
+  try {
+    const r = await api("POST", "/api/provider/test", {
+      base_url: p.base_url, api_path: p.api_path, api_key: p.api_key, model, type: p.type
+    });
+    if (r.ok) resultEl.innerHTML = `✅ 成功（${r.latency_ms}ms）`;
+    else resultEl.innerHTML = `❌ ${escHtml(r.error || "失败")}`;
+  } catch (e) { if (resultEl) resultEl.innerHTML = "❌ " + escHtml(String(e)); }
+}
+
+async function cpFetchModels(id) {
+  const i = cpIdx(id); if (i < 0) return;
+  const p = chatProviders[i];
+  const box = $("cp-fetch-" + i);
+  if (box) box.innerHTML = `<p style="font-size:12px;color:#aaa">⏳ 获取中…</p>`;
+  let r;
+  try {
+    r = await api("POST", "/api/provider/models", { base_url: p.base_url, api_key: p.api_key, type: p.type });
+  } catch (e) { if (box) box.innerHTML = `<p style="font-size:12px;color:#ff6b6b">❌ ${escHtml(String(e))}</p>`; return; }
+  if (!r.ok) { if (box) box.innerHTML = `<p style="font-size:12px;color:#ff6b6b">❌ ${escHtml(r.error || "获取失败")}</p>`; return; }
+  const list = r.models || [];
+  if (!list.length) { if (box) box.innerHTML = `<p style="font-size:12px;color:#888">该供应商未返回模型，可用上方「手动加模型」兜底。</p>`; return; }
+  const existing = new Set(p.models.map(m => m.id));
+  box.innerHTML = `
+    <div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:6px;margin-top:6px">
+      ${list.map(m => `<label style="display:block;font-size:12px;padding:2px 0;cursor:pointer">
+        <input type="checkbox" data-mid="${escHtml(m.id)}" ${existing.has(m.id) ? "checked" : ""} style="width:14px;height:14px;vertical-align:middle"> <span style="font-family:monospace">${escHtml(m.id)}</span>
+      </label>`).join("")}
+    </div>
+    <div class="btn-row" style="justify-content:flex-start;margin-top:6px;gap:8px">
+      <button class="btn-save" type="button" onclick="cpApplyFetched('${id}',${i})">添加选中</button>
+      <button class="btn-cancel" type="button" onclick="$('cp-fetch-${i}').innerHTML=''">取消</button>
+    </div>`;
+}
+
+async function cpApplyFetched(id, idx) {
+  const i = cpIdx(id); if (i < 0) return;
+  const box = $("cp-fetch-" + idx); if (!box) return;
+  const chosen = [];
+  box.querySelectorAll('input[type="checkbox"][data-mid]').forEach(c => { if (c.checked) chosen.push(c.getAttribute("data-mid")); });
+  const oldByID = {}; chatProviders[i].models.forEach(m => { oldByID[m.id] = m; });
+  // 以勾选结果为准：保留勾选的（沿用原 vision 标记），去掉未勾选的
+  chatProviders[i].models = chosen.map(mid => oldByID[mid] || { id: mid, vision: false });
+  await persistChatProviders();
+  box.innerHTML = "";
+  renderChatProviders();
+}
+
+// ── 添加供应商弹窗 ──
+function openAddProviderModal() {
+  closeAddProviderModal();
+  cpModalType = "openai";
+  const ov = document.createElement("div");
+  ov.id = "cpAddOverlay";
+  ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999";
+  ov.onclick = (e) => { if (e.target === ov) closeAddProviderModal(); };
+  ov.innerHTML = `
+    <div style="background:#1e1e1e;border:1px solid rgba(255,255,255,0.15);border-radius:14px;padding:18px;width:min(420px,92vw);max-height:88vh;overflow:auto">
+      <h3 style="margin:0 0 12px 0;color:#ff8359">添加供应商</h3>
+      <div id="cpTabs" style="display:flex;gap:6px;margin-bottom:12px">
+        ${["openai","google","anthropic"].map(t => `<button type="button" data-t="${t}" onclick="cpSetModalType('${t}')" class="btn-save" style="flex:1;padding:6px">${escHtml(CP_TYPE_LABEL[t])}</button>`).join("")}
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;margin:8px 0;font-size:13px"><input type="checkbox" id="cpAddEnabled" checked style="width:16px;height:16px"> 启用</label>
+      <label class="form-label">名称</label>
+      <input class="form-input" id="cpAddName" type="text" placeholder="例：我的网关" autocomplete="off">
+      <label class="form-label">API Key</label>
+      <div style="display:flex;gap:6px">
+        <input class="form-input" id="cpAddKey" type="password" placeholder="sk-..." autocomplete="off" style="font-family:monospace;flex:1">
+        <button class="btn-save" type="button" onclick="cpToggleAddKeyVisible()" style="padding:3px 10px">👁</button>
+      </div>
+      <label class="form-label">API Base URL</label>
+      <input class="form-input" id="cpAddBase" type="text" autocomplete="off" style="font-family:monospace">
+      <label class="form-label">API 路径</label>
+      <input class="form-input" id="cpAddPath" type="text" autocomplete="off" style="font-family:monospace">
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn-cancel" type="button" onclick="closeAddProviderModal()">取消</button>
+        <button class="btn-save" type="button" onclick="confirmAddProvider()">添加</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  cpSetModalType("openai");
+}
+
+function cpSetModalType(t) {
+  cpModalType = t;
+  const pre = CP_PRESET[t] || {};
+  if ($("cpAddBase")) $("cpAddBase").value = pre.base_url || "";
+  if ($("cpAddPath")) $("cpAddPath").value = pre.api_path || "";
+  const nameEl = $("cpAddName");
+  if (nameEl && !nameEl.value.trim()) nameEl.value = CP_DEFAULT_NAME[t] || "";
+  document.querySelectorAll('#cpTabs button[data-t]').forEach(b => {
+    b.style.opacity = (b.getAttribute("data-t") === t) ? "1" : "0.5";
+  });
+}
+
+function cpToggleAddKeyVisible() {
+  const el = $("cpAddKey"); if (!el) return;
+  el.type = el.type === "password" ? "text" : "password";
+}
+
+function closeAddProviderModal() { const o = $("cpAddOverlay"); if (o) o.remove(); }
+
+function cpSlugify(s) {
+  const base = (s || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return base || "provider";
+}
+
+function cpUniqueId(base) {
+  const ids = new Set(chatProviders.map(p => p.id));
+  let id = base, n = 2;
+  while (ids.has(id)) { id = base + "-" + n; n++; }
+  return id;
+}
+
+async function confirmAddProvider() {
+  const name = ($("cpAddName").value || "").trim() || CP_DEFAULT_NAME[cpModalType] || CP_TYPE_LABEL[cpModalType];
+  const prov = {
+    id: cpUniqueId(cpSlugify(name)),
+    name: name,
+    type: cpModalType,
+    enabled: $("cpAddEnabled").checked,
+    base_url: ($("cpAddBase").value || "").trim(),
+    api_path: ($("cpAddPath").value || "").trim(),
+    api_key: ($("cpAddKey").value || "").trim(),
+    models: [],
+  };
+  chatProviders.push(prov);
+  await persistChatProviders();
+  cpExpanded = prov.id;
+  closeAddProviderModal();
+  renderChatProviders();
+  showToast("✅ 已添加，记得「获取」或手动加模型");
 }
 </script>
 </body>

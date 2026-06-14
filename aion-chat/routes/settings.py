@@ -2,7 +2,7 @@
 设置、世界书、模型列表、TTS 路由
 """
 
-import json
+import json, time, re
 
 from fastapi import APIRouter
 from fastapi.responses import Response, FileResponse
@@ -11,7 +11,12 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from config import SETTINGS, MODELS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR
+from config import (
+    SETTINGS, MODELS, save_settings, get_key, get_sentinel_config,
+    load_worldbook, save_worldbook, load_chat_status,
+    TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR,
+    get_chat_providers, save_chat_providers, DEFAULT_CHAT_PROVIDERS,
+)
 from tts import cleanup_tts_cache_dir
 
 router = APIRouter()
@@ -19,7 +24,47 @@ router = APIRouter()
 # ── 模型列表 ──────────────────────────────────────
 @router.get("/api/models")
 async def list_models():
-    return [{"key": k, "provider": v["provider"]} for k, v in MODELS.items()]
+    # 老的写死 MODELS 原样放前面（保持现有下拉不变）
+    items = [{"key": k, "provider": v["provider"]} for k, v in MODELS.items()]
+    # 之后【只追加】已启用供应商的动态模型（key=provider_id/model_id，必含 '/'，不会与老键冲突）
+    try:
+        from ai_providers import build_dynamic_models
+        for key, dcfg in build_dynamic_models().items():
+            items.append({"key": key, "provider": dcfg.get("provider_id", "")})
+    except Exception:
+        pass
+    return items
+
+# ── 聊天供应商持久化（单独端点，合并写入，不走 SettingsUpdate 字段白名单）──
+class ChatProvidersUpdate(BaseModel):
+    chat_providers: list = Field(default_factory=list)
+
+@router.get("/api/chat_providers")
+async def get_chat_providers_api():
+    """读取聊天供应商列表 + 当前默认聊天模型。首次无配置时回退返回 6 个预置。"""
+    providers = get_chat_providers()
+    default_model = SETTINGS.get("default_chat_model", "") or ""
+    if not providers:
+        return {"chat_providers": [dict(p) for p in DEFAULT_CHAT_PROVIDERS], "default_chat_model": default_model}
+    return {"chat_providers": providers, "default_chat_model": default_model}
+
+@router.put("/api/chat_providers")
+async def update_chat_providers_api(body: ChatProvidersUpdate):
+    """合并写入：save_chat_providers 只更新 SETTINGS['chat_providers'] 后整体落盘，
+    不影响人设/定位/各种 key 等其它设置。"""
+    save_chat_providers(body.chat_providers)
+    return {"ok": True}
+
+# ── 默认聊天模型（消除隐式 Gemini，配合 config.get_default_model）──
+class DefaultChatModelUpdate(BaseModel):
+    model: str = ""
+
+@router.put("/api/default_chat_model")
+async def update_default_chat_model(body: DefaultChatModelUpdate):
+    """合并写入 SETTINGS['default_chat_model']。空字符串表示清空（回落供应商首个模型/兜底常量）。"""
+    SETTINGS["default_chat_model"] = (body.model or "").strip()
+    save_settings(SETTINGS)
+    return {"ok": True, "default_chat_model": SETTINGS["default_chat_model"]}
 
 # ── 设置 ──────────────────────────────────────────
 class SettingsUpdate(BaseModel):
@@ -325,3 +370,166 @@ async def tts_voice_list():
         return {"voices": voices}
     except Exception as e:
         return {"voices": [], "error": str(e)}
+
+
+# ── 聊天供应商：测试连接 / 获取模型 ────────────────
+# 关键：两个端点都从【请求体】临时取 base_url/api_key/type，让用户在「保存之前」就能测试和获取，
+# 不读取已存配置。返回体绝不回带完整 api_key；外呼设超时、捕获异常返回结构化错误、不抛 500。
+_PROVIDER_HTTP_TIMEOUT = 30
+# Anthropic 无标准 list 接口，给一组预置 Claude 名（用户可在前端手动增删；可能随官方更新而过时）
+_ANTHROPIC_PRESET_MODELS = [
+    "claude-opus-4-1", "claude-sonnet-4-5", "claude-3-7-sonnet-latest",
+    "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest",
+]
+
+
+def _validate_http_url(url: str) -> bool:
+    """只允许 http/https，挡掉 file:// 等非法 scheme（SSRF 最低限度防护）。"""
+    u = (url or "").strip().lower()
+    return u.startswith("http://") or u.startswith("https://")
+
+
+# 错误文本脱敏：把可能携带密钥的片段替换成 ***，防止 key 随错误/异常文本泄漏到前端。
+# 覆盖：URL 查询串 key=<值>（google 把 key 放查询串）、Authorization: Bearer <token>、anthropic x-api-key。
+_SECRET_PATTERNS = [
+    (re.compile(r'(?i)([?&]key=)[^&\s"\']+'), r'\1***'),
+    (re.compile(r'(?i)(Bearer\s+)[^\s"\']+'), r'\1***'),
+    (re.compile(r'(?i)(x-api-key["\'\s:=]+)[^\s,"\']+'), r'\1***'),
+]
+
+
+def _sanitize_secrets(text) -> str:
+    """对任意错误/异常字符串做密钥脱敏。"""
+    out = str(text)
+    for pat, repl in _SECRET_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def _truncate_err(text, limit: int = 300) -> str:
+    """先脱敏再截断，避免泄露密钥 / 过长内网细节 / 巨大 HTML 错误页。"""
+    return _sanitize_secrets(text).strip()[:limit]
+
+
+class ProviderTestRequest(BaseModel):
+    base_url: str = ""
+    api_path: str = ""
+    api_key: str = ""
+    model: str = ""
+    type: str = "openai"
+
+
+class ProviderModelsRequest(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+    type: str = "openai"
+
+
+@router.post("/api/provider/test")
+async def provider_test(body: ProviderTestRequest):
+    """测试供应商连通性。HTTP 2xx 判成功并返回耗时(ms)。返回 {ok, latency_ms, error}。"""
+    ptype = (body.type or "openai").strip().lower()
+    base_url = (body.base_url or "").strip()
+    api_key = (body.api_key or "").strip()
+    model = (body.model or "").strip()
+
+    # google 允许 base_url 为空（回退标准 Gemini 地址）；其余类型必须给合法 http(s) base_url
+    if ptype != "google" and not _validate_http_url(base_url):
+        return {"ok": False, "latency_ms": 0, "error": "base_url 必须以 http(s):// 开头"}
+    # openai/anthropic 测试需要一个模型名（空 model 上游会报含糊错误）→ 给清晰提示
+    if ptype in ("openai", "anthropic") and not model:
+        return {"ok": False, "latency_ms": 0, "error": "请先选择/填写一个模型再测试"}
+
+    t0 = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=_PROVIDER_HTTP_TIMEOUT) as client:
+            if ptype == "google":
+                gbase = base_url or "https://generativelanguage.googleapis.com/v1beta"
+                if not _validate_http_url(gbase):
+                    return {"ok": False, "latency_ms": 0, "error": "base_url 必须以 http(s):// 开头"}
+                gmodel = model or "gemini-3.5-flash"
+                url = gbase.rstrip("/") + f"/models/{gmodel}:generateContent"
+                resp = await client.post(
+                    url, params={"key": api_key},
+                    json={"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
+                )
+            elif ptype == "anthropic":
+                url = base_url.rstrip("/") + (body.api_path or "/messages")
+                resp = await client.post(
+                    url,
+                    headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    json={"model": model or "claude-3-5-haiku-latest", "max_tokens": 16,
+                          "messages": [{"role": "user", "content": "hello"}]},
+                )
+            else:  # openai 兼容
+                url = base_url.rstrip("/") + (body.api_path or "/chat/completions")
+                resp = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": "hello"}]},
+                )
+        latency = int((time.perf_counter() - t0) * 1000)
+        if 200 <= resp.status_code < 300:
+            return {"ok": True, "latency_ms": latency, "error": ""}
+        return {"ok": False, "latency_ms": latency,
+                "error": f"HTTP {resp.status_code}: {_truncate_err(resp.text)}"}
+    except httpx.TimeoutException:
+        return {"ok": False, "latency_ms": int((time.perf_counter() - t0) * 1000), "error": "请求超时"}
+    except Exception as e:
+        return {"ok": False, "latency_ms": int((time.perf_counter() - t0) * 1000),
+                "error": _truncate_err(e)}
+
+
+@router.post("/api/provider/models")
+async def provider_models(body: ProviderModelsRequest):
+    """拉取该供应商可用模型列表。返回 {ok, models:[{id}], error}。"""
+    ptype = (body.type or "openai").strip().lower()
+    base_url = (body.base_url or "").strip()
+    api_key = (body.api_key or "").strip()
+
+    # anthropic 无标准 list 接口 → 返回预置 Claude 名
+    if ptype == "anthropic":
+        return {"ok": True, "models": [{"id": m} for m in _ANTHROPIC_PRESET_MODELS], "error": ""}
+
+    try:
+        if ptype == "google":
+            gbase = base_url or "https://generativelanguage.googleapis.com/v1beta"
+            if not _validate_http_url(gbase):
+                return {"ok": False, "models": [], "error": "base_url 必须以 http(s):// 开头"}
+            async with httpx.AsyncClient(timeout=_PROVIDER_HTTP_TIMEOUT) as client:
+                resp = await client.get(gbase.rstrip("/") + "/models", params={"key": api_key})
+            if not (200 <= resp.status_code < 300):
+                return {"ok": False, "models": [],
+                        "error": f"HTTP {resp.status_code}: {_truncate_err(resp.text)}"}
+            data = resp.json()
+            models = []
+            for it in (data.get("models") or []):
+                name = it.get("name") or ""
+                if name.startswith("models/"):
+                    name = name[len("models/"):]
+                if name:
+                    models.append({"id": name})
+            return {"ok": True, "models": models, "error": ""}
+
+        # openai 兼容
+        if not _validate_http_url(base_url):
+            return {"ok": False, "models": [], "error": "base_url 必须以 http(s):// 开头"}
+        async with httpx.AsyncClient(timeout=_PROVIDER_HTTP_TIMEOUT) as client:
+            resp = await client.get(base_url.rstrip("/") + "/models",
+                                    headers={"Authorization": f"Bearer {api_key}"})
+        if not (200 <= resp.status_code < 300):
+            return {"ok": False, "models": [],
+                    "error": f"HTTP {resp.status_code}: {_truncate_err(resp.text)}"}
+        data = resp.json()
+        items = data.get("data") if isinstance(data, dict) else None
+        models = []
+        for it in (items or []):
+            mid = it.get("id") if isinstance(it, dict) else None
+            if mid:
+                models.append({"id": mid})
+        return {"ok": True, "models": models, "error": ""}
+    except httpx.TimeoutException:
+        return {"ok": False, "models": [], "error": "请求超时"}
+    except Exception as e:
+        return {"ok": False, "models": [], "error": _truncate_err(e)}

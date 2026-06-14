@@ -7,7 +7,7 @@ from datetime import datetime
 
 import aiosqlite, httpx
 
-from config import get_key, get_sentinel_config, get_embedding_config, load_worldbook, save_chat_status, load_digest_anchor, save_digest_anchor, DEFAULT_MODEL
+from config import get_key, get_sentinel_config, get_embedding_config, load_worldbook, save_chat_status, load_digest_anchor, save_digest_anchor, DEFAULT_MODEL, get_default_model
 from database import get_db
 from ws import manager
 
@@ -602,8 +602,8 @@ async def _get_active_model_and_conv() -> tuple[str, str | None]:
         )
         row = await cur.fetchone()
     if row:
-        return row["model"] or DEFAULT_MODEL, row["id"]
-    return DEFAULT_MODEL, None
+        return row["model"] or get_default_model(), row["id"]
+    return get_default_model(), None
 
 
 async def _do_digest(min_messages: int = 0) -> dict:

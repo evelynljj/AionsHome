@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from config import DEFAULT_MODEL, DATA_DIR, CODEX_UPLOADS_DIR, MODELS
+from config import DEFAULT_MODEL, get_default_model, DATA_DIR, CODEX_UPLOADS_DIR, MODELS
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
@@ -47,7 +47,7 @@ _STRUCTURED_LINE_RE = re.compile(r"^\s*(```|[-*+]\s+|\d+[.)]\s+|[>|#]|\|)")
 
 def _normalize_cli_bubble_breaks(text: str, model_key: str | None) -> str:
     """Gemini CLI often returns casual chat paragraphs separated by single LF only."""
-    if (MODELS.get((model_key or "").strip() or DEFAULT_MODEL, {}).get("provider") != "gemini_cli"):
+    if (MODELS.get((model_key or "").strip() or get_default_model(), {}).get("provider") != "gemini_cli"):
         return text
 
     normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -221,13 +221,14 @@ async def _get_or_create_aion_private_conv() -> str:
 
         now = time.time()
         conv_id = f"conv_{time.time_ns()}"
+        model = get_default_model()
         await db.execute(
             "INSERT INTO conversations (id, title, model, created_at, updated_at) VALUES (?,?,?,?,?)",
-            (conv_id, "悄悄话", DEFAULT_MODEL, now, now),
+            (conv_id, "悄悄话", model, now, now),
         )
         await db.commit()
 
-    conv = {"id": conv_id, "title": "悄悄话", "model": DEFAULT_MODEL, "created_at": now, "updated_at": now}
+    conv = {"id": conv_id, "title": "悄悄话", "model": model, "created_at": now, "updated_at": now}
     await manager.broadcast({"type": "conv_created", "data": conv})
     return conv_id
 
@@ -1025,7 +1026,7 @@ class RoomUpdate(BaseModel):
 class MsgSend(BaseModel):
     content: str
     sender: str = "user"  # "user"
-    model: str = DEFAULT_MODEL
+    model: str | None = None
     connor_model: str = "Codex"
     attachments: list = []
     voice_attachments: list = []  # [{type:'voice', url, duration, transcript}]
@@ -1037,7 +1038,7 @@ class MsgSend(BaseModel):
 
 class AiChatTrigger(BaseModel):
     rounds: Optional[int] = None
-    model: str = DEFAULT_MODEL
+    model: str | None = None
     connor_model: str = "Codex"
     tts_enabled: bool = False
     tts_aion_voice: str = ""
@@ -1046,7 +1047,7 @@ class AiChatTrigger(BaseModel):
 
 class ReplyOnceTrigger(BaseModel):
     speaker: str
-    model: str = DEFAULT_MODEL
+    model: str | None = None
     connor_model: str = "Codex"
     tts_enabled: bool = False
     tts_aion_voice: str = ""
@@ -1056,7 +1057,7 @@ class ReplyOnceTrigger(BaseModel):
 
 class MsgEditResend(BaseModel):
     content: str
-    model: str = DEFAULT_MODEL
+    model: str | None = None
     connor_model: str = "Codex"
     tts_enabled: bool = False
     tts_aion_voice: str = ""
@@ -1065,7 +1066,7 @@ class MsgEditResend(BaseModel):
 
 
 class MsgRegenerate(BaseModel):
-    model: str = DEFAULT_MODEL
+    model: str | None = None
     connor_model: str = "Codex"
     tts_enabled: bool = False
     tts_aion_voice: str = ""
@@ -1682,7 +1683,7 @@ async def send_message(room_id: str, body: MsgSend):
         return {"error": "房间不存在"}
 
     room_type = room["type"]
-    model_key = body.model
+    model_key = body.model or get_default_model()
     connor_model_key = _resolve_connor_model(body.connor_model)
 
     # ── 更新用户最后活跃窗口追踪 ──
@@ -1758,7 +1759,7 @@ async def reply_once(room_id: str, body: ReplyOnceTrigger):
 
     context_limit = room.get("context_minutes", 30)
     query_text = msgs[-1]["content"] if msgs else ""
-    model_key = body.model
+    model_key = body.model or get_default_model()
     connor_model_key = _resolve_connor_model(body.connor_model)
 
     _q: asyncio.Queue = asyncio.Queue()
@@ -1837,7 +1838,7 @@ async def edit_resend_chatroom_message(msg_id: str, body: MsgEditResend):
         return {"error": "房间不存在"}
 
     room_type = room["type"]
-    model_key = body.model
+    model_key = body.model or get_default_model()
     connor_model_key = _resolve_connor_model(body.connor_model)
     context_limit = room.get("context_minutes", 30)
     if room_type == "group":
@@ -1919,7 +1920,7 @@ async def regenerate_chatroom_message(msg_id: str, body: MsgRegenerate):
 
     context_limit = room.get("context_minutes", 30)
     query_text = msgs[-1]["content"] if msgs else ""
-    model_key = body.model
+    model_key = body.model or get_default_model()
     connor_model_key = _resolve_connor_model(body.connor_model)
     _q: asyncio.Queue = asyncio.Queue()
 
@@ -2222,7 +2223,7 @@ async def trigger_ai_chat(room_id: str, body: AiChatTrigger):
         return {"error": "房间不存在"}
 
     max_rounds = body.rounds or room.get("ai_chat_rounds", 1)
-    model_key = body.model
+    model_key = body.model or get_default_model()
     connor_model_key = _resolve_connor_model(body.connor_model)
     context_limit = room.get("context_minutes", 30)
     tts_enabled = body.tts_enabled
@@ -2336,7 +2337,7 @@ async def list_room_memories(room_id: str):
 
 
 @router.post("/rooms/{room_id}/digest")
-async def trigger_digest(room_id: str, model: str = DEFAULT_MODEL):
+async def trigger_digest(room_id: str, model: str | None = None):
     result = await digest_chatroom()
     return result
 

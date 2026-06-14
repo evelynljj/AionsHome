@@ -8,7 +8,10 @@ from pathlib import Path
 import httpx
 import tempfile
 
-from config import get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, get_sentinel_config
+from config import (
+    get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, get_sentinel_config,
+    get_chat_providers, find_provider_by_model,
+)
 
 # CLI 状态前缀：yield 此前缀的 chunk 会被 _bg_generate 拦截为状态事件，不送入 TTS 和正文
 CLI_STATUS_PREFIX = "\x00CLI_STATUS:"
@@ -317,6 +320,169 @@ async def call_siliconflow(messages: list, model: str, meta: dict | None = None,
                         pass
 
 
+# ── 通用 OpenAI 兼容调用器 ────────────────────────
+async def call_openai_compatible(base_url: str, api_path: str, api_key: str, model: str,
+                                 messages: list, meta: dict | None = None,
+                                 temperature: float | None = None, max_tokens: int | None = None):
+    """通用 OpenAI 兼容流式调用器：照搬 call_siliconflow 的 SSE 逻辑，
+    唯一区别是 url / api_key 由参数传入。覆盖 OpenAI / DeepSeek / OpenRouter /
+    硅基流动 / 用户自建网关等所有 OpenAI 兼容供应商。"""
+    url = base_url.rstrip("/") + (api_path or "/chat/completions")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    api_messages = build_multimodal_messages(messages)
+    payload = {"model": model, "messages": api_messages, "stream": True,
+               "stream_options": {"include_usage": True}}
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    try:
+                        err = json.loads(body).get("error", {}).get("message", body.decode())
+                    except:
+                        err = body.decode(errors="replace")[:500]
+                    yield f"[供应商错误 {resp.status_code}] {err}"
+                    return
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: "):
+                        data = line[6:]
+                        if data.strip() == "[DONE]":
+                            return
+                        try:
+                            chunk = json.loads(data)
+                            if meta is not None and "usage" in chunk and chunk["usage"]:
+                                u = chunk["usage"]
+                                meta["prompt_tokens"] = u.get("prompt_tokens", 0)
+                                meta["completion_tokens"] = u.get("completion_tokens", 0)
+                                meta["total_tokens"] = u.get("total_tokens", 0)
+                                meta["raw"] = u  # 保留原始 usage 数据
+                            delta = chunk["choices"][0].get("delta", {}) if chunk.get("choices") else {}
+                            if "content" in delta and delta["content"]:
+                                yield delta["content"]
+                        except:
+                            pass
+    except Exception as e:
+        # 单个供应商失败不应冲断整个对话流：回传结构化错误字符串
+        yield f"[供应商错误] {str(e)[:500]}"
+
+
+# ── Anthropic 原生调用器（Claude /messages，流式）──────
+def _build_anthropic_payload_messages(messages: list):
+    """把 AionsHome 的 [{role, content}] 转成 Anthropic 所需结构：
+      - 所有 role=="system" 内容抽到顶层 system 字段
+      - 其余映射成 user/assistant，content 取字符串
+      - 合并连续同角色（Anthropic 要求严格交替）
+      - 保证首条为 user
+    返回 (system_str, conv_list)。"""
+    system_parts: list[str] = []
+    conv: list[dict] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if not isinstance(content, str):
+            # 多模态/非字符串内容兜底：抽出 text 片段（D 只做文本，正常已是字符串）
+            if isinstance(content, list):
+                content = "\n".join(
+                    (p.get("text", "") if isinstance(p, dict) else str(p)) for p in content
+                ).strip()
+            else:
+                content = str(content)
+        if role == "system":
+            if content:
+                system_parts.append(content)
+            continue
+        arole = "assistant" if role in ("assistant", "model") else "user"
+        if not content:
+            continue
+        if conv and conv[-1]["role"] == arole:
+            conv[-1]["content"] += "\n\n" + content   # 合并连续同角色
+        else:
+            conv.append({"role": arole, "content": content})
+    # 首条须为 user（Anthropic 强制）
+    if conv and conv[0]["role"] == "assistant":
+        conv.insert(0, {"role": "user", "content": "（继续）"})
+    if not conv:
+        conv = [{"role": "user", "content": "hello"}]
+    return ("\n\n".join(system_parts), conv)
+
+
+async def call_anthropic(base_url: str, api_path: str, api_key: str, model: str,
+                         messages: list, meta: dict | None = None,
+                         temperature: float | None = None, max_tokens: int | None = None):
+    """Anthropic 原生 /messages 流式调用器。base 约定含 /v1。
+    headers 用 x-api-key + anthropic-version（不用 Bearer）。D 只做文本，
+    需图片的 anthropic 模型请标 vision=false 走哨兵代看。"""
+    url = base_url.rstrip("/") + (api_path or "/messages")
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
+    system_str, conv = _build_anthropic_payload_messages(messages)
+    payload = {
+        "model": model,
+        "messages": conv,
+        "stream": True,
+        "max_tokens": max_tokens if max_tokens is not None else 4096,   # 必填
+    }
+    if system_str:
+        payload["system"] = system_str
+    if temperature is not None:
+        payload["temperature"] = temperature
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    try:
+                        err = json.loads(body).get("error", {}).get("message", body.decode())
+                    except:
+                        err = body.decode(errors="replace")[:500]
+                    yield f"[供应商错误 {resp.status_code}] {err}"
+                    return
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:].strip()
+                    if not data:
+                        continue
+                    try:
+                        evt = json.loads(data)
+                    except:
+                        continue
+                    etype = evt.get("type")
+                    if etype == "content_block_delta":
+                        delta = evt.get("delta", {}) or {}
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text", "")
+                            if text:
+                                yield text
+                    elif etype == "message_start":
+                        if meta is not None:
+                            u = (evt.get("message", {}) or {}).get("usage", {}) or {}
+                            if u:
+                                meta["prompt_tokens"] = u.get("input_tokens", 0)
+                                meta["raw"] = dict(u)
+                    elif etype == "message_delta":
+                        if meta is not None:
+                            u = evt.get("usage", {}) or {}
+                            if u:
+                                meta["completion_tokens"] = u.get("output_tokens", 0)
+                                meta["total_tokens"] = meta.get("prompt_tokens", 0) + meta["completion_tokens"]
+                                if isinstance(meta.get("raw"), dict):
+                                    meta["raw"].update(u)
+                                else:
+                                    meta["raw"] = dict(u)
+                    elif etype == "message_stop":
+                        return
+    except Exception as e:
+        yield f"[供应商错误] {str(e)[:500]}"
+
+
 # ── Gemini 安全设置（全局关闭内容过滤）─────────────
 GEMINI_SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
@@ -326,8 +492,10 @@ GEMINI_SAFETY_SETTINGS = [
 ]
 
 # ── Gemini ────────────────────────────────────────
-async def call_gemini(messages: list, model: str, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={get_key('gemini')}"
+async def call_gemini(messages: list, model: str, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None, api_key: str | None = None):
+    # 传入 api_key 则用之（动态 google 供应商的条目自带 key）；为空/未传则回退全局 get_key('gemini')。
+    key = api_key or get_key('gemini')
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={key}"
     contents = build_gemini_contents(messages)
     payload = {"contents": contents, "safetySettings": GEMINI_SAFETY_SETTINGS}
     gen_config = {}
@@ -1189,9 +1357,10 @@ def _messages_have_images(messages: list) -> bool:
 
 async def _sentinel_describe_images(messages: list) -> list:
     """用哨兵模型识别消息中的图片，将描述注入文本并剥离图片附件。
-    优先使用用户配置的哨兵模型，失败则回退到 gemini-3.1-flash-lite。"""
+    哨兵未配置或识图失败时不再回落 Gemini：未配置→注入“未配置”提示，失败→注入“识别失败”。"""
     from memory import _call_sentinel_vision
     scfg = get_sentinel_config()
+    sentinel_ready = bool((scfg.get("api_key") or "").strip())
 
     result = []
     for m in messages:
@@ -1216,25 +1385,18 @@ async def _sentinel_describe_images(messages: list) -> list:
             if not mime.startswith("image/"):
                 non_img_atts.append(att)
                 continue
-            # 识图
+            # 哨兵未配置：不发任何识图请求，注入“未配置”提示并剥离该图
+            if not sentinel_ready:
+                img_descs.append("[图片：未配置哨兵模型，无法识别]")
+                continue
+            # 识图（失败不再回落 Gemini，desc 保持 None → “识别失败”）
             img_b64 = base64.b64encode(fpath.read_bytes()).decode()
             prompt = "请详细描述这张图片的内容，包括画面中的人物、物体、文字、场景、颜色、构图等关键信息。用中文回答，尽量简洁但不遗漏重要细节。"
             desc = None
             try:
                 desc = await _call_sentinel_vision(scfg, prompt, img_b64, mime, timeout=30)
             except Exception as e:
-                print(f"[Vision Fallback] 哨兵模型识图失败: {e}，尝试回退 gemini-3.1-flash-lite")
-                # 回退到 Gemini flash-lite
-                fallback_cfg = {
-                    "base_url": "",
-                    "api_key": get_key("gemini_free"),
-                    "model": "gemini-3.1-flash-lite",
-                    "use_openai": False,
-                }
-                try:
-                    desc = await _call_sentinel_vision(fallback_cfg, prompt, img_b64, mime, timeout=30)
-                except Exception as e2:
-                    print(f"[Vision Fallback] 回退模型也失败: {e2}")
+                print(f"[Vision] 哨兵模型识图失败: {e}")
             if desc:
                 img_descs.append(f"[图片内容：{desc}]")
             else:
@@ -1249,6 +1411,60 @@ async def _sentinel_describe_images(messages: list) -> list:
     return result
 
 
+# ── 动态供应商（Kelivo 式聊天模型表）──────────────
+def build_dynamic_models() -> dict:
+    """遍历 get_chat_providers() 中 enabled 的供应商，把已选模型拼成动态模型表：
+    { 'provider_id/model_id': {provider_id, type, model_id, base_url, api_path, api_key, vision, name} }
+    供 stream_ai 分发与（检查点 C 的）/api/models 选择器共用。"""
+    table: dict = {}
+    for p in get_chat_providers():
+        if not p.get("enabled"):
+            continue
+        pid = (p.get("id") or "").strip()
+        if not pid:
+            continue
+        ptype = p.get("type", "openai")
+        base_url = p.get("base_url", "")
+        api_path = p.get("api_path", "")
+        api_key = p.get("api_key", "")
+        name = p.get("name", pid)
+        for m in (p.get("models") or []):
+            mid = (m.get("id") or "").strip()
+            if not mid:
+                continue
+            table[f"{pid}/{mid}"] = {
+                "provider_id": pid, "type": ptype, "model_id": mid,
+                "base_url": base_url, "api_path": api_path, "api_key": api_key,
+                "vision": bool(m.get("vision", False)), "name": name,
+            }
+    return table
+
+
+def _resolve_dynamic_model(model_key: str):
+    """把 model_key 解析为动态供应商分发配置；非动态模型返回 None（交回旧 MODELS 回落）。
+    1) 先查 build_dynamic_models() 的已选模型表（带 vision 标记）。
+    2) 命中供应商但模型不在已选列表（老对话引用了被移除的模型）：用供应商配置兜底，vision 默认 True。
+    静态 MODELS 键均不含 '/'，永远走不到这里，旧行为完全保留。"""
+    if not model_key or "/" not in model_key:
+        return None
+    dcfg = build_dynamic_models().get(model_key)
+    if dcfg is not None:
+        return dcfg
+    provider, _model = find_provider_by_model(model_key)
+    if provider and provider.get("enabled"):
+        return {
+            "provider_id": provider.get("id", ""),
+            "type": provider.get("type", "openai"),
+            "model_id": model_key.split("/", 1)[1],
+            "base_url": provider.get("base_url", ""),
+            "api_path": provider.get("api_path", ""),
+            "api_key": provider.get("api_key", ""),
+            "vision": True,
+            "name": provider.get("name", provider.get("id", "")),
+        }
+    return None
+
+
 # ── 统一调度 ──────────────────────────────────────
 async def stream_ai(messages: list, model_key: str, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None, cancel_event=None):
     normalized = []
@@ -1259,6 +1475,36 @@ async def stream_ai(messages: list, model_key: str, meta: dict | None = None, te
         elif nm["role"] == "cam_log":
             nm["role"] = "assistant"
         normalized.append(nm)
+
+    # ── 动态供应商优先：命中则按 type 分发；未命中回落旧 MODELS（CLI / 现有调用方不受影响）──
+    dcfg = _resolve_dynamic_model(model_key)
+    if dcfg is not None:
+        # 非视觉模型 + 消息含图片 → 哨兵代看（与旧逻辑一致）
+        if not dcfg.get("vision", True) and _messages_have_images(normalized):
+            yield f"{CLI_STATUS_PREFIX}哨兵模型正在识别图片内容..."
+            normalized = await _sentinel_describe_images(normalized)
+        dtype = dcfg.get("type", "openai")
+        if dtype == "google":
+            # 复用现有 Gemini 原生实现；用条目自带 key（为空则回退 get_key('gemini')）。
+            # base_url 对 google 仍走标准 Gemini 地址（call_gemini 内部硬编码），不使用 dcfg["base_url"]。
+            gen = call_gemini(normalized, dcfg["model_id"], meta, temperature, max_tokens,
+                              api_key=(dcfg.get("api_key") or None))
+        elif dtype == "anthropic":
+            gen = call_anthropic(
+                dcfg["base_url"], dcfg["api_path"], dcfg["api_key"],
+                dcfg["model_id"], normalized, meta, temperature, max_tokens,
+            )
+        else:  # openai 兼容
+            gen = call_openai_compatible(
+                dcfg["base_url"], dcfg["api_path"], dcfg["api_key"],
+                dcfg["model_id"], normalized, meta, temperature, max_tokens,
+            )
+        async for chunk in gen:
+            if cancel_event and cancel_event.is_set():
+                return
+            yield chunk
+        return
+
     cfg = MODELS.get(model_key)
     if not cfg:
         yield f"[错误] 未知模型: {model_key}"

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from config import DEFAULT_MODEL, DATA_DIR, SETTINGS, THEATER_TTS_CACHE_DIR, THEATER_TTS_SEGMENT_DELETE_DELAY_SECONDS
+from config import DEFAULT_MODEL, get_default_model, DATA_DIR, SETTINGS, THEATER_TTS_CACHE_DIR, THEATER_TTS_SEGMENT_DELETE_DELAY_SECONDS
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
@@ -54,7 +54,7 @@ class PersonaUpdate(BaseModel):
 class ConvCreate(BaseModel):
     title: str = "新剧场"
     persona_id: str = ""
-    model: str = DEFAULT_MODEL
+    model: str | None = None
 
 
 class ConvUpdate(BaseModel):
@@ -142,14 +142,15 @@ async def list_conversations():
 async def create_conversation(body: ConvCreate):
     now = time.time()
     conv_id = f"tc_{int(now * 1000)}"
+    model = body.model or get_default_model()
     async with get_db() as db:
         await db.execute(
             "INSERT INTO theater_conversations (id, title, persona_id, model, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-            (conv_id, body.title, body.persona_id, body.model, now, now),
+            (conv_id, body.title, body.persona_id, model, now, now),
         )
         await db.commit()
     conv = {"id": conv_id, "title": body.title, "persona_id": body.persona_id,
-            "model": body.model, "created_at": now, "updated_at": now}
+            "model": model, "created_at": now, "updated_at": now}
     await manager.broadcast({"type": "theater_conv_created", "data": conv})
     return conv
 
@@ -267,7 +268,7 @@ async def send_message(conv_id: str, body: MsgCreate):
         db.row_factory = __import__("aiosqlite").Row
         cur = await db.execute("SELECT model, persona_id FROM theater_conversations WHERE id=?", (conv_id,))
         conv = await cur.fetchone()
-        model_key = conv["model"] if conv else DEFAULT_MODEL
+        model_key = conv["model"] if conv else get_default_model()
         persona_id = conv["persona_id"] if conv else ""
 
         # 读上下文
@@ -396,7 +397,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 20, temperature:
         db.row_factory = __import__("aiosqlite").Row
         cur = await db.execute("SELECT model, persona_id FROM theater_conversations WHERE id=?", (conv_id,))
         conv = await cur.fetchone()
-        model_key = conv["model"] if conv else DEFAULT_MODEL
+        model_key = conv["model"] if conv else get_default_model()
         persona_id = conv["persona_id"] if conv else ""
 
         cur = await db.execute(

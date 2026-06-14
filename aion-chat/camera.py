@@ -9,7 +9,7 @@ import cv2, httpx, numpy as np, aiosqlite
 
 from config import (
     DB_PATH, SCREENSHOTS_DIR, MONITOR_LOGS_DIR,
-    get_key, get_sentinel_config, load_worldbook, load_chat_status, load_cam_config, save_cam_config, DEFAULT_MODEL, SETTINGS,
+    get_key, get_sentinel_config, load_worldbook, load_chat_status, load_cam_config, save_cam_config, DEFAULT_MODEL, get_default_model, SETTINGS,
 )
 from database import get_db
 from ws import manager
@@ -1167,7 +1167,7 @@ class CameraMonitor:
             if not conv:
                 return
             conv_id = conv["id"]
-            model_key = conv["model"] or DEFAULT_MODEL
+            model_key = conv["model"] or get_default_model()
 
         from schedule import schedule_mgr
         target = schedule_mgr._resolve_target({"origin": "aion"})

@@ -86,10 +86,10 @@ def get_sentinel_config() -> dict:
             "model": model or "Qwen/Qwen3.6-35B-A3B",
             "use_openai": True,
         }
-    # 默认走 Gemini 原生
+    # 未配齐自有端点 → 返回空 api_key，下游按 if not api_key 干净停用（不再回落 Gemini）
     return {
         "base_url": "",
-        "api_key": get_key("gemini_free"),
+        "api_key": "",
         "model": model or "gemini-3.1-flash-lite",
         "use_openai": False,
     }
@@ -110,13 +110,65 @@ def get_embedding_config() -> dict:
             "model": model or "Qwen/Qwen3-Embedding-8B",
             "use_openai": True,
         }
-    # 默认走 Gemini 原生
+    # 未配齐自有端点 → 返回空 api_key，下游按 if not api_key 干净停用（不再回落 Gemini）
     return {
         "base_url": "",
-        "api_key": get_key("gemini_free"),
+        "api_key": "",
         "model": model or "gemini-embedding-001",
         "use_openai": False,
     }
+
+# ── 聊天供应商（Kelivo 式动态供应商系统）────────────
+# 预置默认供应商：首次由设置页写入；api_key 一律留空，由用户填。
+# 改动半径原则：这里只提供数据与读写/反查函数，不自动写盘、不触碰旧 MODELS。
+DEFAULT_CHAT_PROVIDERS = [
+    {"id": "gemini", "name": "Gemini", "type": "google", "enabled": False,
+     "base_url": "https://generativelanguage.googleapis.com/v1beta", "api_path": "",
+     "api_key": "", "models": []},
+    {"id": "openai", "name": "OpenAI", "type": "openai", "enabled": False,
+     "base_url": "https://api.openai.com/v1", "api_path": "/chat/completions",
+     "api_key": "", "models": []},
+    {"id": "deepseek", "name": "DeepSeek", "type": "openai", "enabled": False,
+     "base_url": "https://api.deepseek.com/v1", "api_path": "/chat/completions",
+     "api_key": "", "models": []},
+    {"id": "openrouter", "name": "OpenRouter", "type": "openai", "enabled": False,
+     "base_url": "https://openrouter.ai/api/v1", "api_path": "/chat/completions",
+     "api_key": "", "models": []},
+    {"id": "siliconflow", "name": "硅基流动", "type": "openai", "enabled": False,
+     "base_url": "https://api.siliconflow.cn/v1", "api_path": "/chat/completions",
+     "api_key": "", "models": []},
+    {"id": "claude", "name": "Claude", "type": "anthropic", "enabled": False,
+     "base_url": "https://api.anthropic.com/v1", "api_path": "/messages",
+     "api_key": "", "models": []},
+]
+
+def get_chat_providers() -> list:
+    """返回用户配置的聊天供应商列表。
+    老 settings 没有该字段时返回空列表，保证不报错、不破坏既有设置。"""
+    providers = SETTINGS.get("chat_providers")
+    return providers if isinstance(providers, list) else []
+
+def save_chat_providers(providers: list):
+    """合并写入：只更新内存 SETTINGS 的 chat_providers 字段后整体落盘，
+    不会清空人设/定位/各种 key 等其它设置（save_settings 落盘的是整个 SETTINGS 全局）。"""
+    SETTINGS["chat_providers"] = providers
+    save_settings(SETTINGS)
+
+def find_provider_by_model(model_key: str):
+    """根据全局标识 'provider_id/model_id' 反查所属供应商配置。
+    模型 id 自身可能含 '/'（如 anthropic/claude-3.5），故只按【首个】'/' 拆分。
+    返回 (provider_dict, model_dict)；供应商存在但模型不在已选列表时返回 (provider_dict, None)；
+    完全查不到返回 (None, None)。"""
+    if not model_key or "/" not in model_key:
+        return None, None
+    provider_id, model_id = model_key.split("/", 1)
+    for p in get_chat_providers():
+        if p.get("id") == provider_id:
+            for m in (p.get("models") or []):
+                if m.get("id") == model_id:
+                    return p, m
+            return p, None
+    return None, None
 
 # ── Worldbook ────────────────────────────────────
 def _default_worldbook() -> dict:
@@ -213,6 +265,27 @@ MODELS = {
 }
 
 DEFAULT_MODEL = "Gemini-3.5-flash"
+
+def get_default_model() -> str:
+    """默认聊天模型解析顺序（消除隐式 Gemini 依赖）：
+    1) SETTINGS['default_chat_model']（非空，用户在设置页显式选的）
+    2) 第一个已启用供应商的第一个已选模型（provider_id/model_id）
+    3) 都没有 → 兜底常量 DEFAULT_MODEL
+    这样只要用户启用了任一供应商就有可用默认，不会落到没钥匙的 Gemini。"""
+    explicit = (SETTINGS.get("default_chat_model") or "").strip()
+    if explicit:
+        return explicit
+    for p in get_chat_providers():
+        if not p.get("enabled"):
+            continue
+        pid = (p.get("id") or "").strip()
+        if not pid:
+            continue
+        for mdl in (p.get("models") or []):
+            mid = (mdl.get("id") or "").strip()
+            if mid:
+                return f"{pid}/{mid}"
+    return DEFAULT_MODEL
 
 # ── 摄像头默认配置 ───────────────────────────────
 DEFAULT_CAM_CFG = {
