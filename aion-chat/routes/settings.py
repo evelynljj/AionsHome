@@ -11,7 +11,12 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from config import SETTINGS, MODELS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR
+from config import (
+    SETTINGS, MODELS, save_settings, get_key, get_sentinel_config,
+    load_worldbook, save_worldbook, load_chat_status,
+    TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR,
+    get_chat_providers, save_chat_providers, DEFAULT_CHAT_PROVIDERS,
+)
 from tts import cleanup_tts_cache_dir
 
 router = APIRouter()
@@ -19,7 +24,35 @@ router = APIRouter()
 # ── 模型列表 ──────────────────────────────────────
 @router.get("/api/models")
 async def list_models():
-    return [{"key": k, "provider": v["provider"]} for k, v in MODELS.items()]
+    # 老的写死 MODELS 原样放前面（保持现有下拉不变）
+    items = [{"key": k, "provider": v["provider"]} for k, v in MODELS.items()]
+    # 之后【只追加】已启用供应商的动态模型（key=provider_id/model_id，必含 '/'，不会与老键冲突）
+    try:
+        from ai_providers import build_dynamic_models
+        for key, dcfg in build_dynamic_models().items():
+            items.append({"key": key, "provider": dcfg.get("provider_id", "")})
+    except Exception:
+        pass
+    return items
+
+# ── 聊天供应商持久化（单独端点，合并写入，不走 SettingsUpdate 字段白名单）──
+class ChatProvidersUpdate(BaseModel):
+    chat_providers: list = Field(default_factory=list)
+
+@router.get("/api/chat_providers")
+async def get_chat_providers_api():
+    """读取聊天供应商列表。首次无配置时回退返回 6 个预置（让用户一进来就能逐个启用填 key）。"""
+    providers = get_chat_providers()
+    if not providers:
+        return {"chat_providers": [dict(p) for p in DEFAULT_CHAT_PROVIDERS]}
+    return {"chat_providers": providers}
+
+@router.put("/api/chat_providers")
+async def update_chat_providers_api(body: ChatProvidersUpdate):
+    """合并写入：save_chat_providers 只更新 SETTINGS['chat_providers'] 后整体落盘，
+    不影响人设/定位/各种 key 等其它设置。"""
+    save_chat_providers(body.chat_providers)
+    return {"ok": True}
 
 # ── 设置 ──────────────────────────────────────────
 class SettingsUpdate(BaseModel):
@@ -391,6 +424,9 @@ async def provider_test(body: ProviderTestRequest):
     # google 允许 base_url 为空（回退标准 Gemini 地址）；其余类型必须给合法 http(s) base_url
     if ptype != "google" and not _validate_http_url(base_url):
         return {"ok": False, "latency_ms": 0, "error": "base_url 必须以 http(s):// 开头"}
+    # openai/anthropic 测试需要一个模型名（空 model 上游会报含糊错误）→ 给清晰提示
+    if ptype in ("openai", "anthropic") and not model:
+        return {"ok": False, "latency_ms": 0, "error": "请先选择/填写一个模型再测试"}
 
     t0 = time.perf_counter()
     try:

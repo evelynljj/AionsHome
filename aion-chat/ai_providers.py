@@ -1244,9 +1244,10 @@ def _messages_have_images(messages: list) -> bool:
 
 async def _sentinel_describe_images(messages: list) -> list:
     """用哨兵模型识别消息中的图片，将描述注入文本并剥离图片附件。
-    优先使用用户配置的哨兵模型，失败则回退到 gemini-3.1-flash-lite。"""
+    哨兵未配置或识图失败时不再回落 Gemini：未配置→注入“未配置”提示，失败→注入“识别失败”。"""
     from memory import _call_sentinel_vision
     scfg = get_sentinel_config()
+    sentinel_ready = bool((scfg.get("api_key") or "").strip())
 
     result = []
     for m in messages:
@@ -1271,25 +1272,18 @@ async def _sentinel_describe_images(messages: list) -> list:
             if not mime.startswith("image/"):
                 non_img_atts.append(att)
                 continue
-            # 识图
+            # 哨兵未配置：不发任何识图请求，注入“未配置”提示并剥离该图
+            if not sentinel_ready:
+                img_descs.append("[图片：未配置哨兵模型，无法识别]")
+                continue
+            # 识图（失败不再回落 Gemini，desc 保持 None → “识别失败”）
             img_b64 = base64.b64encode(fpath.read_bytes()).decode()
             prompt = "请详细描述这张图片的内容，包括画面中的人物、物体、文字、场景、颜色、构图等关键信息。用中文回答，尽量简洁但不遗漏重要细节。"
             desc = None
             try:
                 desc = await _call_sentinel_vision(scfg, prompt, img_b64, mime, timeout=30)
             except Exception as e:
-                print(f"[Vision Fallback] 哨兵模型识图失败: {e}，尝试回退 gemini-3.1-flash-lite")
-                # 回退到 Gemini flash-lite
-                fallback_cfg = {
-                    "base_url": "",
-                    "api_key": get_key("gemini_free"),
-                    "model": "gemini-3.1-flash-lite",
-                    "use_openai": False,
-                }
-                try:
-                    desc = await _call_sentinel_vision(fallback_cfg, prompt, img_b64, mime, timeout=30)
-                except Exception as e2:
-                    print(f"[Vision Fallback] 回退模型也失败: {e2}")
+                print(f"[Vision] 哨兵模型识图失败: {e}")
             if desc:
                 img_descs.append(f"[图片内容：{desc}]")
             else:

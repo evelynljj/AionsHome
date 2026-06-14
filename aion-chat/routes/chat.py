@@ -967,7 +967,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 await _q.put({"type": "chunk", "content": error_text})
 
             stripped = full_text.strip()
-            if not has_error and (stripped.startswith('[Gemini错误') or stripped.startswith('[AntigravityCLI错误') or stripped.startswith('[硅基流动错误') or stripped.startswith('[中转站错误') or stripped.startswith('[错误]') or not stripped):
+            if not has_error and (stripped.startswith('[供应商错误') or stripped.startswith('[Gemini错误') or stripped.startswith('[AntigravityCLI错误') or stripped.startswith('[硅基流动错误') or stripped.startswith('[中转站错误') or stripped.startswith('[错误]') or not stripped):
                 has_error = True
 
             music_matches = MUSIC_CMD_PATTERN.findall(full_text)
@@ -1530,7 +1530,7 @@ async def send_message(conv_id: str, body: MsgCreate):
 
             # 检查 AI 返回的错误文本
             stripped = full_text.strip()
-            if not has_error and (stripped.startswith('[Gemini错误') or stripped.startswith('[AntigravityCLI错误') or stripped.startswith('[硅基流动错误') or stripped.startswith('[中转站错误') or stripped.startswith('[错误]') or not stripped):
+            if not has_error and (stripped.startswith('[供应商错误') or stripped.startswith('[Gemini错误') or stripped.startswith('[AntigravityCLI错误') or stripped.startswith('[硅基流动错误') or stripped.startswith('[中转站错误') or stripped.startswith('[错误]') or not stripped):
                 has_error = True
 
             # 检测 [MUSIC:xxx] 指令 → 搜索歌曲并推送卡片数据
@@ -2478,7 +2478,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
 
             # 检查 AI 返回的错误文本
             stripped = full_text.strip()
-            if not has_error and (stripped.startswith('[Gemini错误') or stripped.startswith('[AntigravityCLI错误') or stripped.startswith('[硅基流动错误') or stripped.startswith('[中转站错误') or stripped.startswith('[错误]') or not stripped):
+            if not has_error and (stripped.startswith('[供应商错误') or stripped.startswith('[Gemini错误') or stripped.startswith('[AntigravityCLI错误') or stripped.startswith('[硅基流动错误') or stripped.startswith('[中转站错误') or stripped.startswith('[错误]') or not stripped):
                 has_error = True
 
             # 检测 [MUSIC:xxx] 指令 → 搜索歌曲并推送卡片数据

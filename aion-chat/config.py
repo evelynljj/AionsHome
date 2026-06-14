@@ -86,10 +86,10 @@ def get_sentinel_config() -> dict:
             "model": model or "Qwen/Qwen3.6-35B-A3B",
             "use_openai": True,
         }
-    # 默认走 Gemini 原生
+    # 未配齐自有端点 → 返回空 api_key，下游按 if not api_key 干净停用（不再回落 Gemini）
     return {
         "base_url": "",
-        "api_key": get_key("gemini_free"),
+        "api_key": "",
         "model": model or "gemini-3.1-flash-lite",
         "use_openai": False,
     }
@@ -110,10 +110,10 @@ def get_embedding_config() -> dict:
             "model": model or "Qwen/Qwen3-Embedding-8B",
             "use_openai": True,
         }
-    # 默认走 Gemini 原生
+    # 未配齐自有端点 → 返回空 api_key，下游按 if not api_key 干净停用（不再回落 Gemini）
     return {
         "base_url": "",
-        "api_key": get_key("gemini_free"),
+        "api_key": "",
         "model": model or "gemini-embedding-001",
         "use_openai": False,
     }
