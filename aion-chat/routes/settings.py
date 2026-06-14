@@ -41,11 +41,12 @@ class ChatProvidersUpdate(BaseModel):
 
 @router.get("/api/chat_providers")
 async def get_chat_providers_api():
-    """读取聊天供应商列表。首次无配置时回退返回 6 个预置（让用户一进来就能逐个启用填 key）。"""
+    """读取聊天供应商列表 + 当前默认聊天模型。首次无配置时回退返回 6 个预置。"""
     providers = get_chat_providers()
+    default_model = SETTINGS.get("default_chat_model", "") or ""
     if not providers:
-        return {"chat_providers": [dict(p) for p in DEFAULT_CHAT_PROVIDERS]}
-    return {"chat_providers": providers}
+        return {"chat_providers": [dict(p) for p in DEFAULT_CHAT_PROVIDERS], "default_chat_model": default_model}
+    return {"chat_providers": providers, "default_chat_model": default_model}
 
 @router.put("/api/chat_providers")
 async def update_chat_providers_api(body: ChatProvidersUpdate):
@@ -53,6 +54,17 @@ async def update_chat_providers_api(body: ChatProvidersUpdate):
     不影响人设/定位/各种 key 等其它设置。"""
     save_chat_providers(body.chat_providers)
     return {"ok": True}
+
+# ── 默认聊天模型（消除隐式 Gemini，配合 config.get_default_model）──
+class DefaultChatModelUpdate(BaseModel):
+    model: str = ""
+
+@router.put("/api/default_chat_model")
+async def update_default_chat_model(body: DefaultChatModelUpdate):
+    """合并写入 SETTINGS['default_chat_model']。空字符串表示清空（回落供应商首个模型/兜底常量）。"""
+    SETTINGS["default_chat_model"] = (body.model or "").strip()
+    save_settings(SETTINGS)
+    return {"ok": True, "default_chat_model": SETTINGS["default_chat_model"]}
 
 # ── 设置 ──────────────────────────────────────────
 class SettingsUpdate(BaseModel):

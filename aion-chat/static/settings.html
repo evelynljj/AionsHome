@@ -19,7 +19,10 @@
     <div>
       <label class="form-label" style="font-size:15px;color:#ff8359">💬 聊天模型（供应商）</label>
       <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">每个供应商可启用/停用、填 Key、测试连通、获取模型。已启用供应商的已选模型会出现在聊天页模型下拉里（改完回聊天页刷新即可看到）。改动即时保存。</p>
-      <div id="chatProvidersList"></div>
+      <label class="form-label">默认聊天模型</label>
+      <p style="font-size:12px;color:#aaa;margin:2px 0 8px 0">新对话、后台记忆/人设任务在未显式选模型时使用。</p>
+      <select class="form-input" id="defaultModelSelect" onchange="cpSetDefaultModel(this.value)" style="font-family:monospace"></select>
+      <div id="chatProvidersList" style="margin-top:14px"></div>
       <div class="btn-row" style="justify-content:flex-start;margin-top:10px">
         <button class="btn-save" type="button" onclick="openAddProviderModal()">＋ 添加供应商</button>
       </div>
@@ -204,6 +207,7 @@ function refreshPhoneScreenStatus() {
 let chatProviders = [];
 let cpExpanded = null;            // 当前展开的供应商 id
 let cpModalType = "openai";
+let cpDefaultModel = "";          // 当前默认聊天模型（provider_id/model_id；空=自动）
 const CP_PRESET = {
   openai:    { base_url: "https://api.openai.com/v1", api_path: "/chat/completions" },
   google:    { base_url: "https://generativelanguage.googleapis.com/v1beta", api_path: "" },
@@ -216,6 +220,7 @@ async function loadChatProviders() {
   try {
     const r = await api("GET", "/api/chat_providers");
     chatProviders = (r && Array.isArray(r.chat_providers)) ? r.chat_providers : [];
+    cpDefaultModel = (r && r.default_chat_model) ? r.default_chat_model : "";
   } catch (e) { chatProviders = []; }
   // 规整字段，避免缺字段渲染报错
   chatProviders.forEach(p => {
@@ -236,6 +241,44 @@ async function persistChatProviders() {
 }
 
 function cpIdx(id) { return chatProviders.findIndex(p => p.id === id); }
+
+function renderDefaultModelSelect() {
+  const sel = $("defaultModelSelect");
+  if (!sel) return;
+  const opts = [];
+  let hasCurrent = false;
+  chatProviders.forEach(p => {
+    if (!p.enabled) return;
+    (p.models || []).forEach(m => {
+      const key = `${p.id}/${m.id}`;
+      if (key === cpDefaultModel) hasCurrent = true;
+      opts.push(`<option value="${escHtml(key)}" ${key === cpDefaultModel ? "selected" : ""}>${escHtml(p.name || p.id)} / ${escHtml(m.id)}</option>`);
+    });
+  });
+  if (!opts.length) {
+    sel.innerHTML = `<option value="">请先启用并添加供应商模型</option>`;
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  // 当前默认不在已启用列表里（被停用/历史值）→ 顶部加占位项标明
+  if (cpDefaultModel && !hasCurrent) {
+    opts.unshift(`<option value="${escHtml(cpDefaultModel)}" selected>${escHtml(cpDefaultModel)}（当前，未在已启用列表）</option>`);
+  }
+  // 没有显式默认 → 顶部“自动”项（value 空，后端回落首个已启用模型）
+  if (!cpDefaultModel) {
+    opts.unshift(`<option value="" selected>自动（用首个已启用供应商模型）</option>`);
+  }
+  sel.innerHTML = opts.join("");
+}
+
+async function cpSetDefaultModel(val) {
+  cpDefaultModel = val || "";
+  try {
+    await api("PUT", "/api/default_chat_model", { model: cpDefaultModel });
+    showToast("✅ 默认聊天模型已更新");
+  } catch (e) { showToast("保存失败"); }
+}
 
 function renderChatProviders() {
   const box = $("chatProvidersList");
@@ -290,6 +333,7 @@ function renderChatProviders() {
       ${detail}
     </div>`;
   }).join("");
+  renderDefaultModelSelect();
 }
 
 function cpToggleExpand(id) { cpExpanded = (cpExpanded === id) ? null : id; renderChatProviders(); }

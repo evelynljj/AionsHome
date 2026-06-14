@@ -266,6 +266,27 @@ MODELS = {
 
 DEFAULT_MODEL = "Gemini-3.5-flash"
 
+def get_default_model() -> str:
+    """默认聊天模型解析顺序（消除隐式 Gemini 依赖）：
+    1) SETTINGS['default_chat_model']（非空，用户在设置页显式选的）
+    2) 第一个已启用供应商的第一个已选模型（provider_id/model_id）
+    3) 都没有 → 兜底常量 DEFAULT_MODEL
+    这样只要用户启用了任一供应商就有可用默认，不会落到没钥匙的 Gemini。"""
+    explicit = (SETTINGS.get("default_chat_model") or "").strip()
+    if explicit:
+        return explicit
+    for p in get_chat_providers():
+        if not p.get("enabled"):
+            continue
+        pid = (p.get("id") or "").strip()
+        if not pid:
+            continue
+        for mdl in (p.get("models") or []):
+            mid = (mdl.get("id") or "").strip()
+            if mid:
+                return f"{pid}/{mid}"
+    return DEFAULT_MODEL
+
 # ── 摄像头默认配置 ───────────────────────────────
 DEFAULT_CAM_CFG = {
     "camera_index": 0,

@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Any
 
-from config import DEFAULT_MODEL, load_worldbook, SETTINGS, UPLOADS_DIR, CODEX_UPLOADS_DIR, PUBLIC_DIR, MODELS
+from config import DEFAULT_MODEL, get_default_model, load_worldbook, SETTINGS, UPLOADS_DIR, CODEX_UPLOADS_DIR, PUBLIC_DIR, MODELS
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
@@ -449,7 +449,7 @@ async def _music_sys_msg(conv_id: str, music_cards: list):
 # ── Pydantic 模型 ─────────────────────────────────
 class ConvCreate(BaseModel):
     title: str = "新对话"
-    model: str = DEFAULT_MODEL
+    model: str | None = None
 
 class ConvUpdate(BaseModel):
     title: Optional[str] = None
@@ -501,13 +501,14 @@ async def list_conversations():
 async def create_conversation(body: ConvCreate):
     now = time.time()
     conv_id = f"conv_{int(now*1000)}"
+    model = body.model or get_default_model()
     async with get_db() as db:
         await db.execute(
             "INSERT INTO conversations (id, title, model, created_at, updated_at) VALUES (?,?,?,?,?)",
-            (conv_id, body.title, body.model, now, now)
+            (conv_id, body.title, model, now, now)
         )
         await db.commit()
-    conv = {"id": conv_id, "title": body.title, "model": body.model, "created_at": now, "updated_at": now}
+    conv = {"id": conv_id, "title": body.title, "model": model, "created_at": now, "updated_at": now}
     await manager.broadcast({"type": "conv_created", "data": conv})
     await export_conversation(conv_id)
     return conv
@@ -773,7 +774,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
         db.row_factory = __import__('aiosqlite').Row
         cur = await db.execute("SELECT model FROM conversations WHERE id=?", (conv_id,))
         conv = await cur.fetchone()
-        model_key = conv["model"] if conv else DEFAULT_MODEL
+        model_key = conv["model"] if conv else get_default_model()
 
     # ── 合并私聊 + 群聊消息为统一时间线 ──
     merged = await fetch_merged_timeline("aion", body.context_limit, conv_id=conv_id)
@@ -1262,7 +1263,7 @@ async def send_message(conv_id: str, body: MsgCreate):
         db.row_factory = __import__('aiosqlite').Row
         cur = await db.execute("SELECT model FROM conversations WHERE id=?", (conv_id,))
         conv = await cur.fetchone()
-        model_key = conv["model"] if conv else DEFAULT_MODEL
+        model_key = conv["model"] if conv else get_default_model()
 
     # ── 合并私聊 + 群聊消息为统一时间线 ──
     merged = await fetch_merged_timeline("aion", body.context_limit, conv_id=conv_id)
@@ -2254,7 +2255,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         db.row_factory = __import__('aiosqlite').Row
         cur = await db.execute("SELECT model FROM conversations WHERE id=?", (conv_id,))
         conv = await cur.fetchone()
-        model_key = conv["model"] if conv else DEFAULT_MODEL
+        model_key = conv["model"] if conv else get_default_model()
 
     # ── 合并私聊 + 群聊消息为统一时间线 ──
     merged = await fetch_merged_timeline("aion", context_limit, conv_id=conv_id)

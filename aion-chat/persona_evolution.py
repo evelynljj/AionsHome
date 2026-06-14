@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 
 from ai_providers import simple_ai_call
-from config import DEFAULT_MODEL, load_worldbook, save_worldbook
+from config import DEFAULT_MODEL, get_default_model, load_worldbook, save_worldbook
 from database import get_db
 
 
@@ -506,7 +506,7 @@ async def _main_ai_model() -> str:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT model FROM conversations ORDER BY updated_at DESC LIMIT 1")
         row = await cur.fetchone()
-    return (row["model"] if row and row["model"] else DEFAULT_MODEL) or DEFAULT_MODEL
+    return (row["model"] if row and row["model"] else get_default_model()) or get_default_model()
 
 
 async def _actor_model(actor: str) -> str:
