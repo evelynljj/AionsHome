@@ -45,7 +45,7 @@
       <label class="form-label">API 地址（Base URL）</label>
       <input class="form-input" type="text" id="embeddingBaseUrlInput" placeholder="例：https://api.siliconflow.cn" autocomplete="off" style="font-family:monospace">
       <label class="form-label">API Key</label>
-      <input class="form-input" type="text" id="embeddingApiKeyInput" placeholder="留空则复用 Gemini Free Key" autocomplete="off" style="font-family:monospace">
+      <input class="form-input" type="text" id="embeddingApiKeyInput" placeholder="留空则该功能停用（需填写）" autocomplete="off" style="font-family:monospace">
       <label class="form-label">模型名称</label>
       <input class="form-input" type="text" id="embeddingModelInput" placeholder="例：Qwen/Qwen3-Embedding-8B" autocomplete="off" style="font-family:monospace">
     </div>
@@ -299,7 +299,7 @@ function renderChatProviders() {
       <div style="margin-top:10px">
         <label class="form-label">API Key</label>
         <div style="display:flex;gap:6px">
-          <input class="form-input" type="password" id="cp-key-${idx}" value="${escHtml(p.api_key)}" placeholder="${p.type==='google'?'留空则用全局 Gemini Key':'sk-...'}" autocomplete="off" style="font-family:monospace;flex:1" onchange="cpEditField('${p.id}','api_key',this.value)">
+          <input class="form-input" type="password" id="cp-key-${idx}" value="${escHtml(p.api_key)}" placeholder="${p.type==='google'?'留空则无 Key（需填写）':'sk-...'}" autocomplete="off" style="font-family:monospace;flex:1" onchange="cpEditField('${p.id}','api_key',this.value)">
           <button class="btn-save" type="button" onclick="cpToggleKeyVisible(${idx})" style="padding:3px 10px">👁</button>
         </div>
         <label class="form-label">API Base URL</label>
