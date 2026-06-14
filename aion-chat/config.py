@@ -138,7 +138,7 @@ DEFAULT_CHAT_PROVIDERS = [
      "base_url": "https://api.siliconflow.cn/v1", "api_path": "/chat/completions",
      "api_key": "", "models": []},
     {"id": "claude", "name": "Claude", "type": "anthropic", "enabled": False,
-     "base_url": "https://api.anthropic.com", "api_path": "/messages",
+     "base_url": "https://api.anthropic.com/v1", "api_path": "/messages",
      "api_key": "", "models": []},
 ]
 

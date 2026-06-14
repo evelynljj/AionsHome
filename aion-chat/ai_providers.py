@@ -370,6 +370,119 @@ async def call_openai_compatible(base_url: str, api_path: str, api_key: str, mod
         yield f"[供应商错误] {str(e)[:500]}"
 
 
+# ── Anthropic 原生调用器（Claude /messages，流式）──────
+def _build_anthropic_payload_messages(messages: list):
+    """把 AionsHome 的 [{role, content}] 转成 Anthropic 所需结构：
+      - 所有 role=="system" 内容抽到顶层 system 字段
+      - 其余映射成 user/assistant，content 取字符串
+      - 合并连续同角色（Anthropic 要求严格交替）
+      - 保证首条为 user
+    返回 (system_str, conv_list)。"""
+    system_parts: list[str] = []
+    conv: list[dict] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if not isinstance(content, str):
+            # 多模态/非字符串内容兜底：抽出 text 片段（D 只做文本，正常已是字符串）
+            if isinstance(content, list):
+                content = "\n".join(
+                    (p.get("text", "") if isinstance(p, dict) else str(p)) for p in content
+                ).strip()
+            else:
+                content = str(content)
+        if role == "system":
+            if content:
+                system_parts.append(content)
+            continue
+        arole = "assistant" if role in ("assistant", "model") else "user"
+        if not content:
+            continue
+        if conv and conv[-1]["role"] == arole:
+            conv[-1]["content"] += "\n\n" + content   # 合并连续同角色
+        else:
+            conv.append({"role": arole, "content": content})
+    # 首条须为 user（Anthropic 强制）
+    if conv and conv[0]["role"] == "assistant":
+        conv.insert(0, {"role": "user", "content": "（继续）"})
+    if not conv:
+        conv = [{"role": "user", "content": "hello"}]
+    return ("\n\n".join(system_parts), conv)
+
+
+async def call_anthropic(base_url: str, api_path: str, api_key: str, model: str,
+                         messages: list, meta: dict | None = None,
+                         temperature: float | None = None, max_tokens: int | None = None):
+    """Anthropic 原生 /messages 流式调用器。base 约定含 /v1。
+    headers 用 x-api-key + anthropic-version（不用 Bearer）。D 只做文本，
+    需图片的 anthropic 模型请标 vision=false 走哨兵代看。"""
+    url = base_url.rstrip("/") + (api_path or "/messages")
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
+    system_str, conv = _build_anthropic_payload_messages(messages)
+    payload = {
+        "model": model,
+        "messages": conv,
+        "stream": True,
+        "max_tokens": max_tokens if max_tokens is not None else 4096,   # 必填
+    }
+    if system_str:
+        payload["system"] = system_str
+    if temperature is not None:
+        payload["temperature"] = temperature
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    try:
+                        err = json.loads(body).get("error", {}).get("message", body.decode())
+                    except:
+                        err = body.decode(errors="replace")[:500]
+                    yield f"[供应商错误 {resp.status_code}] {err}"
+                    return
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:].strip()
+                    if not data:
+                        continue
+                    try:
+                        evt = json.loads(data)
+                    except:
+                        continue
+                    etype = evt.get("type")
+                    if etype == "content_block_delta":
+                        delta = evt.get("delta", {}) or {}
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text", "")
+                            if text:
+                                yield text
+                    elif etype == "message_start":
+                        if meta is not None:
+                            u = (evt.get("message", {}) or {}).get("usage", {}) or {}
+                            if u:
+                                meta["prompt_tokens"] = u.get("input_tokens", 0)
+                                meta["raw"] = dict(u)
+                    elif etype == "message_delta":
+                        if meta is not None:
+                            u = evt.get("usage", {}) or {}
+                            if u:
+                                meta["completion_tokens"] = u.get("output_tokens", 0)
+                                meta["total_tokens"] = meta.get("prompt_tokens", 0) + meta["completion_tokens"]
+                                if isinstance(meta.get("raw"), dict):
+                                    meta["raw"].update(u)
+                                else:
+                                    meta["raw"] = dict(u)
+                    elif etype == "message_stop":
+                        return
+    except Exception as e:
+        yield f"[供应商错误] {str(e)[:500]}"
+
+
 # ── Gemini 安全设置（全局关闭内容过滤）─────────────
 GEMINI_SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
@@ -1377,9 +1490,10 @@ async def stream_ai(messages: list, model_key: str, meta: dict | None = None, te
             gen = call_gemini(normalized, dcfg["model_id"], meta, temperature, max_tokens,
                               api_key=(dcfg.get("api_key") or None))
         elif dtype == "anthropic":
-            yield ("[错误] Anthropic 原生调用暂未实现（检查点 D）。"
-                   "可先通过 OpenRouter 等 OpenAI 兼容端点使用 Claude。")
-            return
+            gen = call_anthropic(
+                dcfg["base_url"], dcfg["api_path"], dcfg["api_key"],
+                dcfg["model_id"], normalized, meta, temperature, max_tokens,
+            )
         else:  # openai 兼容
             gen = call_openai_compatible(
                 dcfg["base_url"], dcfg["api_path"], dcfg["api_key"],
